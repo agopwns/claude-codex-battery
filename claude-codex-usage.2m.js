@@ -150,9 +150,9 @@ function drawNum(cv, x, y, str, col) {
 }
 const numW = (s) => s.length * 5 - 1;
 const heatRemain = (r) =>
-  r < 20 ? [248, 81, 73] : r < 50 ? [210, 153, 34] : [63, 185, 80]; // PNG 픽셀용 RGB
+  r < 20 ? [214, 48, 49] : r < 50 ? [191, 127, 20] : [40, 150, 63]; // PNG 픽셀용 RGB (진한 톤)
 const heatRemainHex = (r) =>
-  r < 20 ? "#f85149" : r < 50 ? "#d29922" : "#3fb950"; // SwiftBar color= 용 hex
+  r < 20 ? "#d63031" : r < 50 ? "#bf7f14" : "#28963f"; // SwiftBar color= 용 hex (진한 톤)
 // 캡슐 하나: 테두리 + 잔량 채움 + 안에 잔량 숫자(100 포함, 항상 표시)
 function drawCapsule(cv, x, midY, remain, ink) {
   const bw = 18,
