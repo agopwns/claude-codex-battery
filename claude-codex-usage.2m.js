@@ -45,7 +45,7 @@ const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
 // ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.1.0";
+const VERSION = "1.1.1";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/dennykim123/claude-codex-battery/main";
@@ -175,25 +175,34 @@ const NUM = {
   C: ["0110", "1001", "1000", "1000", "1001", "0110"],
   X: ["1001", "1001", "0110", "0110", "1001", "1001"],
 };
-function drawNum(cv, x, y, str, col) {
+// altCol/boundaryX 지정 시: 픽셀 x가 채움 경계(boundaryX) 왼쪽이면 altCol(밝은 채움 위 대비),
+// 오른쪽(빈 배경)이면 col. 지정 없으면 col 단색(그룹 라벨용).
+function drawNum(cv, x, y, str, col, altCol, boundaryX) {
   let cx = x;
   for (const ch of str) {
     const g = NUM[ch];
     if (g)
       for (let r = 0; r < 6; r++)
         for (let c = 0; c < 4; c++)
-          if (g[r][c] === "1") cv.set(cx + c, y + r, col);
+          if (g[r][c] === "1") {
+            const px = cx + c;
+            cv.set(px, y + r, altCol && px < boundaryX ? altCol : col);
+          }
     cx += 5;
   }
   return cx;
 }
 const numW = (s) => s.length * 5 - 1;
-const heatRemain = (r) =>
-  r < 20 ? [214, 48, 49] : r < 50 ? [191, 127, 20] : [40, 150, 63]; // PNG 픽셀용 RGB (진한 톤)
+// 실제 macOS 배터리 인디케이터 색 (Apple HIG system colors, 다크/라이트 각각)
+function heatRemain(r, dark) {
+  if (r <= 20) return dark ? [255, 69, 58] : [255, 59, 48]; // systemRed
+  if (r < 50) return dark ? [255, 214, 10] : [255, 204, 0]; // systemYellow
+  return dark ? [48, 209, 88] : [52, 199, 89]; // systemGreen
+}
 const heatRemainHex = (r) =>
-  r < 20 ? "#d63031" : r < 50 ? "#bf7f14" : "#28963f"; // SwiftBar color= 용 hex (진한 톤)
+  r <= 20 ? "#FF453A" : r < 50 ? "#FFD60A" : "#30D158"; // 드롭다운 게이지 (다크 기준)
 // 캡슐 하나: 테두리 + 잔량 채움 + 안에 잔량 숫자(100 포함, 항상 표시)
-function drawCapsule(cv, x, midY, remain, ink) {
+function drawCapsule(cv, x, midY, remain, ink, dark) {
   const bw = 18,
     bh = 10,
     by = midY - Math.floor(bh / 2);
@@ -203,10 +212,11 @@ function drawCapsule(cv, x, midY, remain, ink) {
     const innerW = bw - 4;
     const v = Math.max(0, Math.min(100, remain));
     const fw = Math.round((v / 100) * innerW);
-    if (fw > 0) _rect(cv, x + 2, by + 2, fw, bh - 4, heatRemain(remain));
+    if (fw > 0) _rect(cv, x + 2, by + 2, fw, bh - 4, heatRemain(remain, dark));
     const s = String(Math.round(v));
     const tx = x + Math.floor((bw - numW(s)) / 2);
-    drawNum(cv, tx, midY - 3, s, ink); // 채움 위에 ink색 숫자 (100도 표시)
+    // 채움(밝은 system color) 위 픽셀은 어두운 숫자, 빈 배경 위는 ink → 어디서나 대비 확보
+    drawNum(cv, tx, midY - 3, s, ink, [30, 30, 30], x + 2 + (fw > 0 ? fw : 0));
   }
   return x + bw + 2;
 }
@@ -243,7 +253,7 @@ function renderBatteryImage(dark, items) {
       x += numW(g) + LBLGAP;
       pg = g;
     } else x += GAP;
-    drawCapsule(cv, x, midY, items[i].remain, ink);
+    drawCapsule(cv, x, midY, items[i].remain, ink, dark);
     x += CAPW;
   }
   return encodePNG(cv.w, cv.h, cv.buf).toString("base64");
