@@ -227,6 +227,18 @@ let NOTIFY = "on";
 try {
   if (readFileSync(NOTIFY_FILE, "utf8").trim() === "off") NOTIFY = "off";
 } catch {}
+// macOS 알림 발사 (detached osascript, 메시지가 ps 프로세스 목록에 남지 않음) — 임계값 알림 + C5 소진 예측 알림 공용
+function fireNotification(msg) {
+  try {
+    const esc = (s) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const cmd = `osascript -e 'display notification "${esc(msg)}" with title "${esc("Claude·Codex Battery")}"'`;
+    const child = spawn("/bin/sh", ["-c", cmd], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+  } catch {}
+}
 // 배터리 키 → 사람이 읽는 라벨 (설정 서브메뉴 + 알림 엔진 공용)
 const battLabels = {
   c5: "Claude 5시간 (C5)",
@@ -482,6 +494,11 @@ const fmtTok = (n) => {
   if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
   if (n >= 1e3) return `${(n / 1e3).toFixed(0)}K`;
   return `${n}`;
+};
+// epoch초 → 로컬 HH:MM (24시간제, 0패딩) — C5 소진 예측 시각 표시용
+const hhmm = (epochSec) => {
+  const d = new Date(epochSec * 1000);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 };
 
 // ── 1. Claude Code: 활성 5시간 블록 ────────────────────────
@@ -883,17 +900,6 @@ if (!visibleItems.length) visibleItems = battItems;
 {
   const NOTIFY_STATE_FILE = `${HOME}/.claude/swiftbar/.batt-notify-state.json`;
   const zoneOf = (r) => (r <= 10 ? "low10" : r <= 20 ? "low20" : "ok");
-  const fireNotification = (msg) => {
-    try {
-      const esc = (s) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-      const cmd = `osascript -e 'display notification "${esc(msg)}" with title "${esc("Claude·Codex Battery")}"'`;
-      const child = spawn("/bin/sh", ["-c", cmd], {
-        detached: true,
-        stdio: "ignore",
-      });
-      child.unref();
-    } catch {}
-  };
   let notifyState = {};
   try {
     const parsed = JSON.parse(readFileSync(NOTIFY_STATE_FILE, "utf8"));
@@ -939,6 +945,63 @@ if (!visibleItems.length) visibleItems = battItems;
   } catch {}
 }
 
+// ── C5(Claude 5시간) 소진 페이스 예측: 최근 90분 샘플의 기울기로 리셋 전 소진 여부를 투영 ──
+const BURN_FILE = `${HOME}/.claude/swiftbar/.batt-burn.json`;
+let c5ProjectionRow = null;
+{
+  try {
+    const w = cusage?.fiveHour;
+    if (w && typeof w.resetsAt === "number" && w.resetsAt > now) {
+      let state = null;
+      try {
+        const parsed = JSON.parse(readFileSync(BURN_FILE, "utf8"));
+        if (
+          parsed &&
+          typeof parsed === "object" &&
+          typeof parsed.resetsAt === "number" &&
+          Array.isArray(parsed.samples)
+        )
+          state = parsed;
+      } catch {}
+      if (!state) state = { resetsAt: w.resetsAt, samples: [], notifiedAt: 0 };
+      if (typeof state.notifiedAt !== "number") state.notifiedAt = 0;
+      // 리셋 시각이 바뀌었다 = 새 블록 시작 → 샘플 초기화
+      if (Math.abs(state.resetsAt - w.resetsAt) > 600) {
+        state = { resetsAt: w.resetsAt, samples: [], notifiedAt: 0 };
+      }
+      const remainNow = 100 - (w.pct ?? 0);
+      const prevLast = state.samples[state.samples.length - 1] || null;
+      state.samples.push({ t: now, remain: remainNow });
+      state.samples = state.samples.filter((s) => now - s.t <= 90 * 60);
+      // 직전 샘플보다 잔량이 5%p 넘게 급상승 = 블록 중간 이상치(계정 단위 회복 등) → 새 샘플만 유지
+      if (prevLast && remainNow - prevLast.remain > 5) {
+        state.samples = [{ t: now, remain: remainNow }];
+      }
+      const first = state.samples[0];
+      const last = state.samples[state.samples.length - 1];
+      if (state.samples.length >= 3 && last.t - first.t >= 15 * 60) {
+        const rate = (first.remain - last.remain) / (last.t - first.t); // %/sec
+        if (rate > 0) {
+          const depleteT = now + last.remain / rate;
+          if (depleteT < state.resetsAt) {
+            c5ProjectionRow = `      예상 소진 ${hhmm(depleteT)} ⚠️ 리셋(${hhmm(state.resetsAt)}) 전 소진 페이스 | font=Menlo size=11 color=#FF453A`;
+            if (NOTIFY !== "off" && state.notifiedAt !== state.resetsAt) {
+              fireNotification(
+                `⏳ Claude 5시간 — 현재 페이스면 ${hhmm(depleteT)} 소진 (리셋 ${hhmm(state.resetsAt)} 전)`,
+              );
+              state.notifiedAt = state.resetsAt;
+            }
+          } else {
+            c5ProjectionRow = `      페이스 −${(rate * 3600).toFixed(1)}%/h · 리셋까지 여유 | font=Menlo size=11 color=#8b949e`;
+          }
+        }
+      }
+      mkdirSync(dirname(BURN_FILE), { recursive: true });
+      writeFileSync(BURN_FILE, JSON.stringify(state));
+    }
+  } catch {}
+}
+
 // 잔량 숫자가 캡슐 안에 들어감 → 메뉴바는 이미지만. 라벨은 드롭다운 범례.
 // 둘 다 없으면(신규/양쪽 미사용) 배터리 대신 안내 아이콘.
 if (battItems.length) {
@@ -978,6 +1041,7 @@ if (hasClaude) {
       );
     };
     winRow("5시간 남음", cusage.fiveHour);
+    if (c5ProjectionRow) out.push(c5ProjectionRow);
     winRow("주간 남음 ", cusage.weekly);
     if (cusage.fable) winRow(`${cusage.fable.model} 남음`, cusage.fable);
     out.push(
