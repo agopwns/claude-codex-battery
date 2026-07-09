@@ -149,7 +149,7 @@ If you'd rather it never spend tokens on its own, comment out the `maybeAutoRefr
 | Want to change | Where |
 |---|---|
 | Refresh interval | filename `.2m.` → `.1m.`, `.5m.`, `.30s.`, … |
-| Battery size | `drawCapsule`: `bw` / `bh` (5×7 font sets the floor) |
+| Battery size | **↕ row in the dropdown** — toggles between big (4×6 font, default) and small (3×5 font, ~25% narrower); stored in `~/.claude/swiftbar/.batt-size` |
 | Color thresholds | `heatRemain` / `heatRemainHex` (20 % / 50 %) |
 | Disable Codex auto-refresh | comment out `maybeAutoRefreshCodex(codex)` |
 | Disable live Claude API / Keychain access | `touch ~/.claude/swiftbar/.no-live` (falls back to local cache files) |

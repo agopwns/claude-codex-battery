@@ -46,7 +46,7 @@ const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
 // ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.2.2";
+const VERSION = "1.3.0";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/dennykim123/claude-codex-battery/main";
@@ -161,8 +161,15 @@ const _stroke = (cv, x, y, rw, rh, col) => {
     cv.set(x + rw - 1, y + j, col);
   }
 };
-// 5x7 픽셀 폰트 (캡슐 안 숫자 + 그룹 라벨 C/X)
-const NUM = {
+// ── 크기 프리셋: big(기본) / small — 드롭다운 ↕ 행 또는 ~/.claude/swiftbar/.batt-size 로 전환 ──
+const SIZE_FILE = `${HOME}/.claude/swiftbar/.batt-size`;
+let SIZE = "big";
+try {
+  if (readFileSync(SIZE_FILE, "utf8").trim() === "small") SIZE = "small";
+} catch {}
+
+// 4x6 픽셀 폰트 (big 프리셋)
+const FONT46 = {
   0: ["0110", "1001", "1001", "1001", "1001", "0110"],
   1: ["0010", "0110", "0010", "0010", "0010", "0111"],
   2: ["0110", "1001", "0010", "0100", "1000", "1111"],
@@ -176,18 +183,37 @@ const NUM = {
   C: ["0110", "1001", "1000", "1000", "1001", "0110"],
   X: ["1001", "1001", "0110", "0110", "1001", "1001"],
 };
+// 3x5 클래식 픽셀 폰트 (small 프리셋)
+const FONT35 = {
+  0: ["111", "101", "101", "101", "111"],
+  1: ["010", "110", "010", "010", "111"],
+  2: ["111", "001", "111", "100", "111"],
+  3: ["111", "001", "111", "001", "111"],
+  4: ["101", "101", "111", "001", "001"],
+  5: ["111", "100", "111", "001", "111"],
+  6: ["111", "100", "111", "101", "111"],
+  7: ["111", "001", "001", "001", "001"],
+  8: ["111", "101", "111", "101", "111"],
+  9: ["111", "101", "111", "001", "111"],
+  C: ["111", "100", "100", "100", "111"],
+  X: ["101", "101", "010", "101", "101"],
+};
+// 프리셋별 지오메트리: font/자간, 캡슐(bw×bh), 배치(capw·간격), 캔버스 높이, 숫자 y오프셋
+const PRESET =
+  SIZE === "small"
+    ? { font: FONT35, adv: () => 4, bw: 14, bh: 9, capw: 16, gap: 3, ggap: 7, pad: 1, lblgap: 2, H: 9, dy: 2 }
+    : { font: FONT46, adv: (ch) => (ch === "1" ? 4 : 5), bw: 18, bh: 10, capw: 20, gap: 5, ggap: 10, pad: 2, lblgap: 3, H: 12, dy: 3 };
+const NUM = PRESET.font;
 // altCol/boundaryX 지정 시: 픽셀 x가 채움 경계(boundaryX) 왼쪽이면 altCol(밝은 채움 위 대비),
 // 오른쪽(빈 배경)이면 col. 지정 없으면 col 단색(그룹 라벨용).
-// '1'은 시각폭이 좁아 전진폭 4px (커닝) — "100"이 14→12px가 되어
-// 캡슐(내폭 14px) 안에서 테두리에 물리지 않는다.
-const chAdv = (ch) => (ch === "1" ? 4 : 5);
+const chAdv = PRESET.adv; // big: 5px('1'만 4px 커닝 — "100" 물림 방지), small: 4px
 function drawNum(cv, x, y, str, col, altCol, boundaryX) {
   let cx = x;
   for (const ch of str) {
     const g = NUM[ch];
     if (g)
-      for (let r = 0; r < 6; r++)
-        for (let c = 0; c < 4; c++)
+      for (let r = 0; r < g.length; r++)
+        for (let c = 0; c < g[r].length; c++)
           if (g[r][c] === "1") {
             const px = cx + c;
             cv.set(px, y + r, altCol && px < boundaryX ? altCol : col);
@@ -207,8 +233,8 @@ const heatRemainHex = (r) =>
   r <= 20 ? "#FF453A" : r < 50 ? "#FFD60A" : "#30D158"; // 드롭다운 게이지 (다크 기준)
 // 캡슐 하나: 테두리 + 잔량 채움 + 안에 잔량 숫자(100 포함, 항상 표시)
 function drawCapsule(cv, x, midY, remain, ink, dark) {
-  const bw = 16,
-    bh = 10,
+  const bw = PRESET.bw,
+    bh = PRESET.bh,
     by = midY - Math.floor(bh / 2);
   _stroke(cv, x, by, bw, bh, ink);
   _rect(cv, x + bw, by + 3, 2, bh - 6, ink); // 단자
@@ -220,19 +246,19 @@ function drawCapsule(cv, x, midY, remain, ink, dark) {
     const s = String(Math.round(v));
     const tx = x + Math.floor((bw - numW(s)) / 2);
     // 채움(밝은 system color) 위 픽셀은 어두운 숫자, 빈 배경 위는 ink → 어디서나 대비 확보
-    drawNum(cv, tx, midY - 3, s, ink, [30, 30, 30], x + 2 + (fw > 0 ? fw : 0));
+    drawNum(cv, tx, midY - PRESET.dy, s, ink, [30, 30, 30], x + 2 + (fw > 0 ? fw : 0));
   }
   return x + bw + 2;
 }
 // 캡슐 N개(items=[{label,remain}]). 그룹(C=Claude / X=Codex) 앞에 라벨 문자.
 function renderBatteryImage(dark, items) {
   const ink = dark ? [235, 235, 235] : [45, 45, 45];
-  const CAPW = 18,
-    GAP = 3,
-    GGAP = 7,
-    PAD = 1,
-    LBLGAP = 2;
-  const H = 10; // 캡슐 높이에 딱 맞춤(여백 0) — 캡슐 10px 자체가 6행 폰트+테두리+숨구멍의 하한
+  const CAPW = PRESET.capw,
+    GAP = PRESET.gap,
+    GGAP = PRESET.ggap,
+    PAD = PRESET.pad,
+    LBLGAP = PRESET.lblgap;
+  const H = PRESET.H;
   const midY = Math.floor(H / 2);
   // 폭 계산 (그룹 라벨 포함)
   let W = PAD * 2;
@@ -253,7 +279,7 @@ function renderBatteryImage(dark, items) {
     const g = items[i].label[0];
     if (g !== pg) {
       if (pg !== null) x += GGAP;
-      drawNum(cv, x, midY - 3, g, ink); // 그룹 라벨 C 또는 X
+      drawNum(cv, x, midY - PRESET.dy, g, ink); // 그룹 라벨 C 또는 X
       x += numW(g) + LBLGAP;
       pg = g;
     } else x += GAP;
@@ -793,6 +819,13 @@ if (claude && !claude.error) {
 out.push(
   `v${VERSION}  ·  Claude & Codex Usage Battery | size=11 color=#8b949e`,
 );
+// 크기 전환 — .batt-size 파일에 반대 프리셋을 기록하고 즉시 새로고침
+{
+  const other = SIZE === "big" ? "small" : "big";
+  out.push(
+    `↕ 배터리 크기: ${SIZE === "big" ? "크게 (기본)" : "작게"} — 클릭하면 ${other === "big" ? "크게" : "작게"}로 | bash=/bin/sh param1=-c param2="mkdir -p '${HOME}/.claude/swiftbar' && echo ${other} > '${SIZE_FILE}'" terminal=false refresh=true size=11 color=#8b949e`,
+  );
+}
 out.push(
   `⭐ by Denny Kim — github.com/dennykim123 | href=https://github.com/dennykim123/claude-codex-battery size=11 color=#8b949e`,
 );
