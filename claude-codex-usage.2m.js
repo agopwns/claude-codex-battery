@@ -656,6 +656,46 @@ function monthlyUsageRow(hist) {
   if (prevHas) s += `  ·  지난달 $${prevSum.toFixed(0)}`;
   return `${s} | size=11 color=#8b949e`;
 }
+// 최근 7일(로컬 달력 기준, 오늘 포함) 일별 지출 막대 차트 행. 데이터 없으면(전부 null) null.
+// 막대 색: 오늘=진하게(다크/라이트 대비), 나머지 데이터일=회색, 결측일=흐린 회색 1px 스텁.
+// 차트 버그가 드롭다운 전체를 죽이면 안 되므로 통째로 try/catch.
+function sparklineRow(hist, dark) {
+  try {
+    if (!hist) return null;
+    const days = [];
+    for (let i = 6; i >= 0; i--) {
+      const key = localYmd(new Date(Date.now() - i * 86400e3));
+      days.push(hist[key]?.cost ?? null);
+    }
+    const known = days.filter((v) => v != null);
+    if (!known.length) return null;
+    const sum = known.reduce((a, b) => a + b, 0);
+    const maxCost = Math.max(...known);
+    const cv = makeCanvas(7 * 5 + 1, 16);
+    const baseline = 15;
+    for (let i = 0; i < 7; i++) {
+      const cost = days[i];
+      const x = 1 + i * 5;
+      if (cost == null) {
+        _rect(cv, x, baseline, 4, 1, [128, 128, 128, 60]);
+        continue;
+      }
+      const barH =
+        maxCost > 0 ? Math.max(1, Math.round((cost / maxCost) * 14)) : 1;
+      const isToday = i === 6;
+      const col = isToday
+        ? dark
+          ? [255, 255, 255]
+          : [45, 45, 45]
+        : [128, 128, 128, 180];
+      _rect(cv, x, baseline - barH + 1, 4, barH, col);
+    }
+    const img = encodePNG(cv.w, cv.h, cv.buf, SCALE * 72).toString("base64");
+    return `최근 7일 $${sum.toFixed(0)} · 최대 $${maxCost.toFixed(0)}/일 | image=${img} size=11 color=#8b949e`;
+  } catch {
+    return null;
+  }
+}
 
 // ── 1c. Claude 실제 rate limit — Anthropic OAuth usage API 직접 조회 ──
 // 이 맥의 Claude Code 로그인 토큰(키체인)으로 /usage와 같은 데이터를 서버에서 직접
@@ -1025,11 +1065,12 @@ let c5ProjectionRow = null;
 
 // 잔량 숫자가 캡슐 안에 들어감 → 메뉴바는 이미지만. 라벨은 드롭다운 범례.
 // 둘 다 없으면(신규/양쪽 미사용) 배터리 대신 안내 아이콘.
+const dark = isDarkMode(); // 배터리 아이콘 + 스파크라인 공용 — 매번 다시 조회하지 않는다
 if (battItems.length) {
   if (DISPLAY === "text") {
     out.push(`${compactBattText(visibleItems)} | font=Menlo size=12`);
   } else {
-    out.push(`| image=${renderBatteryImage(isDarkMode(), visibleItems)}`);
+    out.push(`| image=${renderBatteryImage(dark, visibleItems)}`);
   }
 } else {
   out.push("🔋 —");
@@ -1095,6 +1136,8 @@ if (hasClaude) {
     }
     const monthRow = monthlyUsageRow(usageHist);
     if (monthRow) out.push(monthRow);
+    const sparkRow = sparklineRow(usageHist, dark);
+    if (sparkRow) out.push(sparkRow);
   }
   out.push("---");
 }
