@@ -543,6 +543,68 @@ function getClaudeModels() {
   }
 }
 
+// ── 1b-2. 일별 사용량 영구 스냅샷 — ccusage 로그는 ~30일이면 유실되므로
+// 위젯이 돌 때마다(2분 주기) 오늘자 총합을 로컬 날짜 기준으로 UPSERT해 보관한다 ──
+const USAGE_HISTORY_FILE = `${HOME}/.claude/swiftbar/usage-history.json`;
+const localYmd = (d = new Date()) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+// cmodels(getClaudeModels 결과)를 오늘 키로 덮어쓰기 저장. 마지막 실행 값이 그날의 최종치가 된다.
+// 파일이 없거나 깨졌으면 {}부터 다시 시작(자가 복구). 400개 초과 시 오래된 날짜부터 정리.
+function upsertUsageHistory(cmodels) {
+  try {
+    let hist = {};
+    try {
+      const parsed = JSON.parse(readFileSync(USAGE_HISTORY_FILE, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+        hist = parsed;
+    } catch {}
+    const models = {};
+    let tokens = 0;
+    for (const m of cmodels.models) {
+      models[m.name] = m.cost;
+      tokens += m.tokens;
+    }
+    hist[localYmd()] = { cost: cmodels.total, tokens, models };
+    const keys = Object.keys(hist).sort();
+    if (keys.length > 400) {
+      for (const k of keys.slice(0, keys.length - 400)) delete hist[k];
+    }
+    mkdirSync(dirname(USAGE_HISTORY_FILE), { recursive: true });
+    writeFileSync(USAGE_HISTORY_FILE, JSON.stringify(hist));
+    return hist;
+  } catch {
+    return null;
+  }
+}
+// 히스토리에서 이번 달·지난달 누적 비용 행 문자열 생성 (데이터 없으면 null)
+function monthlyUsageRow(hist) {
+  if (!hist) return null;
+  const d = new Date();
+  const y = d.getFullYear(),
+    mo = d.getMonth(); // 0-indexed
+  const curPrefix = `${y}-${String(mo + 1).padStart(2, "0")}`;
+  let prevY = y,
+    prevMo = mo - 1;
+  if (prevMo < 0) {
+    prevMo = 11;
+    prevY = y - 1;
+  }
+  const prevPrefix = `${prevY}-${String(prevMo + 1).padStart(2, "0")}`;
+  let curSum = 0,
+    prevSum = 0,
+    prevHas = false;
+  for (const [k, v] of Object.entries(hist)) {
+    if (k.startsWith(curPrefix)) curSum += v.cost || 0;
+    else if (k.startsWith(prevPrefix)) {
+      prevSum += v.cost || 0;
+      prevHas = true;
+    }
+  }
+  let s = `이번 달 누적 $${curSum.toFixed(0)}`;
+  if (prevHas) s += `  ·  지난달 $${prevSum.toFixed(0)}`;
+  return `${s} | size=11 color=#8b949e`;
+}
+
 // ── 1c. Claude 실제 rate limit — Anthropic OAuth usage API 직접 조회 ──
 // 이 맥의 Claude Code 로그인 토큰(키체인)으로 /usage와 같은 데이터를 서버에서 직접
 // 가져온다. 수치는 계정 단위 합산이라 다른 디바이스·데스크톱앱·웹 사용분도 포함.
@@ -758,6 +820,7 @@ function maybeAutoRefreshCodex(codex) {
 const claude = getClaude();
 const cusage = getClaudeUsage();
 const cmodels = getClaudeModels();
+const usageHist = cmodels ? upsertUsageHistory(cmodels) : null;
 const codex = getCodex();
 maybeAutoRefreshCodex(codex); // 소진+오래됨 시 백그라운드 갱신 (throttle)
 const out = [];
@@ -865,6 +928,8 @@ if (hasClaude) {
         `${label}▕${g}▏ $${m.cost.toFixed(1)}  ${fmtTok(m.tokens)} | font=Menlo`,
       );
     }
+    const monthRow = monthlyUsageRow(usageHist);
+    if (monthRow) out.push(monthRow);
   }
   out.push("---");
 }
