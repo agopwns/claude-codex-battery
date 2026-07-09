@@ -99,7 +99,7 @@ function crc32(buf) {
   for (let i = 0; i < buf.length; i++) c = CRC[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
   return (c ^ 0xffffffff) >>> 0;
 }
-function encodePNG(w, h, rgba) {
+function encodePNG(w, h, rgba, dpi) {
   const sig = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
   const mk = (type, data) => {
     const len = Buffer.alloc(4);
@@ -121,14 +121,19 @@ function encodePNG(w, h, rgba) {
     rgba.copy(raw, y * (stride + 1) + 1, y * stride, y * stride + stride);
   }
   const idat = zlib.deflateSync(raw, { level: 9 });
-  return Buffer.concat([
-    sig,
-    mk("IHDR", ihdr),
-    mk("IDAT", idat),
-    mk("IEND", Buffer.alloc(0)),
-  ]);
+  const chunks = [sig, mk("IHDR", ihdr)];
+  if (dpi) {
+    // pHYs: DPI 선언 → NSImage가 포인트 크기를 px*72/dpi로 축소 (레티나 1:1 렌더)
+    const phys = Buffer.alloc(9);
+    const ppm = Math.round(dpi / 0.0254);
+    phys.writeUInt32BE(ppm, 0);
+    phys.writeUInt32BE(ppm, 4);
+    phys[8] = 1;
+    chunks.push(mk("pHYs", phys));
+  }
+  chunks.push(mk("IDAT", idat), mk("IEND", Buffer.alloc(0)));
+  return Buffer.concat(chunks);
 }
-const SCALE = 2;
 function makeCanvas(wl, hl) {
   const w = wl * SCALE,
     h = hl * SCALE;
@@ -145,7 +150,17 @@ function makeCanvas(wl, hl) {
         buf[px + 3] = a;
       }
   };
-  return { w, h, buf, set };
+  // 물리 픽셀 좌표 직접 기록 — 글자 렌더 전용(FS가 SCALE과 다를 수 있어 set()의 논리 좌표계로는 표현 불가)
+  const setPx = (px, py, col) => {
+    if (px < 0 || py < 0 || px >= w || py >= h) return;
+    const [r, g, b, a = 255] = col;
+    const o = (py * w + px) * 4;
+    buf[o] = r;
+    buf[o + 1] = g;
+    buf[o + 2] = b;
+    buf[o + 3] = a;
+  };
+  return { w, h, buf, set, setPx };
 }
 const _rect = (cv, x, y, rw, rh, col) => {
   for (let j = 0; j < rh; j++)
@@ -161,11 +176,50 @@ const _stroke = (cv, x, y, rw, rh, col) => {
     cv.set(x + rw - 1, y + j, col);
   }
 };
-// ── 크기 프리셋: big(기본) / small — 드롭다운 ↕ 행 또는 ~/.claude/swiftbar/.batt-size 로 전환 ──
+// ── 크기 프리셋: big(기본) / small — 드롭다운 ⚙️ 배터리 설정 또는 ~/.claude/swiftbar/.batt-size 로 전환 ──
 const SIZE_FILE = `${HOME}/.claude/swiftbar/.batt-size`;
 let SIZE = "big";
 try {
   if (readFileSync(SIZE_FILE, "utf8").trim() === "small") SIZE = "small";
+} catch {}
+// ── 채움 색: traffic(신호등, 기본) / white — ~/.claude/swiftbar/.batt-fill ──
+const FILL_FILE = `${HOME}/.claude/swiftbar/.batt-fill`;
+let FILL = "traffic";
+try {
+  if (readFileSync(FILL_FILE, "utf8").trim() === "white") FILL = "white";
+} catch {}
+// ── 글자 크기: 70/80/90/100% — ~/.claude/swiftbar/.batt-font (그 외 값·파일 없음은 100%로 폴백) ──
+const FONT_FILE = `${HOME}/.claude/swiftbar/.batt-font`;
+let FONTPCT = 100;
+try {
+  const v = parseInt(readFileSync(FONT_FILE, "utf8").trim(), 10);
+  if ([70, 80, 90, 100].includes(v)) FONTPCT = v;
+} catch {}
+// ── 글자 색: auto(기본, 항상 어두운 색) / black / white / red / blue — ~/.claude/swiftbar/.batt-text ──
+const TEXT_FILE = `${HOME}/.claude/swiftbar/.batt-text`;
+let TEXTCOL = "auto";
+try {
+  const v = readFileSync(TEXT_FILE, "utf8").trim();
+  if (["black", "white", "red", "blue"].includes(v)) TEXTCOL = v;
+} catch {}
+// ── 전체 크기: 50~200% 정수(5% 스텝 UI) — ~/.claude/swiftbar/.batt-scale (그 외 값·파일 없음은 100%로 폴백) ──
+const SCALE_FILE = `${HOME}/.claude/swiftbar/.batt-scale`;
+let SIZEPCT = 100;
+try {
+  const v = parseInt(readFileSync(SCALE_FILE, "utf8").trim(), 10);
+  if (Number.isInteger(v) && v >= 50 && v <= 200) SIZEPCT = v;
+} catch {}
+// ── 배터리 표시 선택: 켤 배터리 키 CSV (c5,cw,cf,x5,xw) — 파일 없음/전부 무효면 전체 표시 ──
+const SHOW_FILE = `${HOME}/.claude/swiftbar/.batt-show`;
+const ALL_BATTS = ["c5", "cw", "cf", "x5", "xw"];
+let SHOWSET = new Set(ALL_BATTS);
+try {
+  const keys = readFileSync(SHOW_FILE, "utf8")
+    .trim()
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter((k) => ALL_BATTS.includes(k));
+  if (keys.length) SHOWSET = new Set(keys);
 } catch {}
 
 // 4x6 픽셀 폰트 (big 프리셋)
@@ -201,27 +255,65 @@ const FONT35 = {
 // 프리셋별 지오메트리: font/자간, 캡슐(bw×bh), 배치(capw·간격), 캔버스 높이, 숫자 y오프셋
 const PRESET =
   SIZE === "small"
-    ? { font: FONT35, adv: () => 4, bw: 14, bh: 9, capw: 16, gap: 3, ggap: 7, pad: 1, lblgap: 2, H: 9, dy: 2 }
-    : { font: FONT46, adv: (ch) => (ch === "1" ? 4 : 5), bw: 18, bh: 10, capw: 20, gap: 5, ggap: 10, pad: 2, lblgap: 3, H: 12, dy: 3 };
+    ? {
+        font: FONT35,
+        adv: () => 4,
+        bw: 14,
+        bh: 9,
+        capw: 16,
+        gap: 3,
+        ggap: 7,
+        pad: 1,
+        lblgap: 2,
+        H: 9,
+        dy: 2,
+        scale: 3,
+        dpi: 144, // 27px 캔버스를 13.5pt로 표시 — 레티나(2x) 디바이스 픽셀 1:1
+      }
+    : {
+        font: FONT46,
+        adv: (ch) => (ch === "1" ? 4 : 5),
+        bw: 18,
+        bh: 10,
+        capw: 20,
+        gap: 5,
+        ggap: 10,
+        pad: 2,
+        lblgap: 3,
+        H: 12,
+        dy: 3,
+        scale: 2,
+        dpi: 0, // 기존 크기 유지 (pHYs 없음)
+      };
+const SCALE = PRESET.scale;
 const NUM = PRESET.font;
-// altCol/boundaryX 지정 시: 픽셀 x가 채움 경계(boundaryX) 왼쪽이면 altCol(밝은 채움 위 대비),
-// 오른쪽(빈 배경)이면 col. 지정 없으면 col 단색(그룹 라벨용).
+// 글자 전용 물리 스케일 (SCALE*FONTPCT/100, 소수 허용 — 70~90%는 캡슐 내부에 여백을 남긴다)
+const FS = (SCALE * FONTPCT) / 100;
+const FONT_ROWS = SIZE === "small" ? 5 : 6; // 폰트 행 수 (FONT35=5, FONT46=6) — 세로 중앙정렬용
 const chAdv = PRESET.adv; // big: 5px('1'만 4px 커닝 — "100" 물림 방지), small: 4px
-function drawNum(cv, x, y, str, col, altCol, boundaryX) {
-  let cx = x;
+// 물리 픽셀 공간에 글리프 문자열 렌더 (fs = 글리프 1px당 물리 px, 소수 허용 — nearest-neighbor)
+// colorAt(physicalX): 픽셀별 색 결정 콜백 — 채움 경계 대비 처리(drawCapsule)나 단색(그룹 라벨)에 사용
+function drawTextPx(cv, xPx, yPx, str, fs, colorAt) {
+  let cx = xPx;
   for (const ch of str) {
     const g = NUM[ch];
-    if (g)
-      for (let r = 0; r < g.length; r++)
-        for (let c = 0; c < g[r].length; c++)
-          if (g[r][c] === "1") {
-            const px = cx + c;
-            cv.set(px, y + r, altCol && px < boundaryX ? altCol : col);
-          }
-    cx += chAdv(ch);
+    if (g) {
+      const rows = g.length,
+        cols = g[0].length;
+      const gw = Math.round(cols * fs),
+        gh = Math.round(rows * fs);
+      const x0 = Math.round(cx);
+      for (let py = 0; py < gh; py++)
+        for (let px = 0; px < gw; px++) {
+          const r = Math.min(rows - 1, Math.floor(py / fs));
+          const c = Math.min(cols - 1, Math.floor(px / fs));
+          if (g[r][c] === "1") cv.setPx(x0 + px, yPx + py, colorAt(x0 + px));
+        }
+    }
+    cx += chAdv(ch) * fs;
   }
-  return cx;
 }
+// 레이아웃 폭(논리 단위)은 FONTPCT와 무관하게 고정 — 글자 크기를 바꿔도 캡슐 간격이 흔들리지 않도록
 const numW = (s) => [...s].reduce((w, ch) => w + chAdv(ch), 0) - 1;
 // 실제 macOS 배터리 인디케이터 색 (Apple HIG system colors, 다크/라이트 각각)
 function heatRemain(r, dark) {
@@ -242,11 +334,37 @@ function drawCapsule(cv, x, midY, remain, ink, dark) {
     const innerW = bw - 4;
     const v = Math.max(0, Math.min(100, remain));
     const fw = Math.round((v / 100) * innerW);
-    if (fw > 0) _rect(cv, x + 2, by + 2, fw, bh - 4, heatRemain(remain, dark));
+    // 채움 색: traffic(기본)=신호등 system color, white=다크에서 흰색·라이트에서 진회색(가독성 유지)
+    const fillCol =
+      FILL === "white"
+        ? dark
+          ? [255, 255, 255]
+          : [60, 60, 60]
+        : heatRemain(remain, dark);
+    if (fw > 0) _rect(cv, x + 2, by + 2, fw, bh - 4, fillCol);
+    // 빈 구간 트랙: 반투명 오버레이로 대비 확보 (macOS 시스템 배터리 아이콘 스타일)
+    const trackCol = dark ? [255, 255, 255, 90] : [0, 0, 0, 50];
+    if (fw < innerW)
+      _rect(cv, x + 2 + fw, by + 2, innerW - fw, bh - 4, trackCol);
     const s = String(Math.round(v));
-    const tx = x + Math.floor((bw - numW(s)) / 2);
-    // 채움(밝은 system color) 위 픽셀은 어두운 숫자, 빈 배경 위는 ink → 어디서나 대비 확보
-    drawNum(cv, tx, midY - PRESET.dy, s, ink, [30, 30, 30], x + 2 + (fw > 0 ? fw : 0));
+    const txPx = x * SCALE + (bw * SCALE - numW(s) * FS) / 2;
+    const tyPx = Math.round((by + bh / 2) * SCALE - (FONT_ROWS * FS) / 2);
+    // 숫자 색: 글리프를 한 가지 색으로 통째로 렌더 (경계 분할 제거 — 트랙이 빈 구간 대비를 보장)
+    const digitCol =
+      TEXTCOL === "black"
+        ? [30, 30, 30]
+        : TEXTCOL === "white"
+          ? [255, 255, 255]
+          : TEXTCOL === "red"
+            ? dark
+              ? [255, 69, 58]
+              : [255, 59, 48]
+            : TEXTCOL === "blue"
+              ? dark
+                ? [10, 132, 255]
+                : [0, 122, 255]
+              : [30, 30, 30]; // auto: 항상 어두운 숫자 — white/traffic 채움과 회색 트랙 모두 위에서 읽힘
+    drawTextPx(cv, txPx, tyPx, s, FS, () => digitCol);
   }
   return x + bw + 2;
 }
@@ -279,14 +397,20 @@ function renderBatteryImage(dark, items) {
     const g = items[i].label[0];
     if (g !== pg) {
       if (pg !== null) x += GGAP;
-      drawNum(cv, x, midY - PRESET.dy, g, ink); // 그룹 라벨 C 또는 X
+      // 그룹 라벨(C 또는 X) — 논리 박스(numW(g)) 안에서 물리 좌표로 중앙정렬해 그린다
+      const lxPx = x * SCALE + (numW(g) * SCALE - numW(g) * FS) / 2;
+      const lyPx = Math.round(cv.h / 2 - (FONT_ROWS * FS) / 2);
+      drawTextPx(cv, lxPx, lyPx, g, FS, () => ink);
       x += numW(g) + LBLGAP;
       pg = g;
     } else x += GAP;
     drawCapsule(cv, x, midY, items[i].remain, ink, dark);
     x += CAPW;
   }
-  return encodePNG(cv.w, cv.h, cv.buf).toString("base64");
+  // 전체 크기 %: pHYs DPI를 역비례로 조정 — 표시 pt = px*72/dpi. 100%면 프리셋 기본값 그대로(바이트 동일 경로 유지)
+  const dpiEff =
+    SIZEPCT === 100 ? PRESET.dpi : ((PRESET.dpi || 72) * 100) / SIZEPCT;
+  return encodePNG(cv.w, cv.h, cv.buf, dpiEff).toString("base64");
 }
 function isDarkMode() {
   try {
@@ -672,10 +796,14 @@ if (codex && (codex.primary || codex.secondary)) {
       : 0;
   battItems.push({ label: "X", remain });
 }
+// 표시 선택 적용 — premium "X" 라벨은 x5 토글에 귀속. 전부 꺼지면 안전하게 전체 표시(드롭다운 진입로 유지)
+const battKey = (label) => (label === "X" ? "x5" : label.toLowerCase());
+let visibleItems = battItems.filter((b) => SHOWSET.has(battKey(b.label)));
+if (!visibleItems.length) visibleItems = battItems;
 // 잔량 숫자가 캡슐 안에 들어감 → 메뉴바는 이미지만. 라벨은 드롭다운 범례.
 // 둘 다 없으면(신규/양쪽 미사용) 배터리 대신 안내 아이콘.
 if (battItems.length) {
-  out.push(`| image=${renderBatteryImage(isDarkMode(), battItems)}`);
+  out.push(`| image=${renderBatteryImage(isDarkMode(), visibleItems)}`);
 } else {
   out.push("🔋 —");
 }
@@ -823,12 +951,58 @@ if (claude && !claude.error) {
 out.push(
   `v${VERSION}  ·  Claude & Codex Usage Battery | size=11 color=#8b949e`,
 );
-// 크기 전환 — .batt-size 파일에 반대 프리셋을 기록하고 즉시 새로고침
+// 배터리 설정 서브메뉴 — 크기 / 채움 색 / 글자 크기. 옵션 클릭 시 해당 설정 파일에 값을 기록하고 새로고침
 {
-  const other = SIZE === "big" ? "small" : "big";
-  out.push(
-    `↕ 배터리 크기: ${SIZE === "big" ? "크게 (기본)" : "작게"} — 클릭하면 ${other === "big" ? "크게" : "작게"}로 | bash=/bin/sh param1=-c param2="mkdir -p '${HOME}/.claude/swiftbar' && echo ${other} > '${SIZE_FILE}'" terminal=false refresh=true size=11 color=#8b949e`,
+  const SETTINGS_DIR = `${HOME}/.claude/swiftbar`;
+  const settingRow = (label, active, file, val) =>
+    out.push(
+      `-- ${active ? "✓ " : ""}${label} | bash=/bin/sh param1=-c param2="mkdir -p '${SETTINGS_DIR}' && echo ${val} > '${file}'" terminal=false refresh=true size=11 color=#8b949e`,
+    );
+  out.push("⚙️ 배터리 설정 | size=11 color=#8b949e");
+  settingRow("크기: 크게", SIZE === "big", SIZE_FILE, "big");
+  settingRow("크기: 작게", SIZE === "small", SIZE_FILE, "small");
+  const up = Math.min(200, SIZEPCT + 5);
+  const down = Math.max(50, SIZEPCT - 5);
+  settingRow(
+    `전체 크기 +5% → ${up}% (현재 ${SIZEPCT}%)`,
+    false,
+    SCALE_FILE,
+    String(up),
   );
+  settingRow(
+    `전체 크기 −5% → ${down}% (현재 ${SIZEPCT}%)`,
+    false,
+    SCALE_FILE,
+    String(down),
+  );
+  const battLabels = {
+    c5: "Claude 5시간 (C5)",
+    cw: "Claude 주간 (CW)",
+    cf: "Fable 주간 (CF)",
+    x5: "Codex 5시간 (X5)",
+    xw: "Codex 주간 (XW)",
+  };
+  for (const k of ALL_BATTS) {
+    const on = SHOWSET.has(k);
+    const next = ALL_BATTS.filter((b) => (b === k ? !on : SHOWSET.has(b)));
+    settingRow(
+      `표시: ${battLabels[k]}`,
+      on,
+      SHOW_FILE,
+      next.length ? next.join(",") : "none",
+    );
+  }
+  settingRow("채움 색: 신호등", FILL === "traffic", FILL_FILE, "traffic");
+  settingRow("채움 색: 흰색", FILL === "white", FILL_FILE, "white");
+  settingRow("글자 색: 자동", TEXTCOL === "auto", TEXT_FILE, "auto");
+  settingRow("글자 색: 검정", TEXTCOL === "black", TEXT_FILE, "black");
+  settingRow("글자 색: 흰색", TEXTCOL === "white", TEXT_FILE, "white");
+  settingRow("글자 색: 빨강", TEXTCOL === "red", TEXT_FILE, "red");
+  settingRow("글자 색: 파랑", TEXTCOL === "blue", TEXT_FILE, "blue");
+  settingRow("글자 크기: 100%", FONTPCT === 100, FONT_FILE, "100");
+  settingRow("글자 크기: 90%", FONTPCT === 90, FONT_FILE, "90");
+  settingRow("글자 크기: 80%", FONTPCT === 80, FONT_FILE, "80");
+  settingRow("글자 크기: 70%", FONTPCT === 70, FONT_FILE, "70");
 }
 out.push(
   `⭐ github.com/dennykim123/claude-codex-battery | href=https://github.com/dennykim123/claude-codex-battery size=11 color=#8b949e`,
