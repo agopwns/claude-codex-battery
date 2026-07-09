@@ -227,6 +227,12 @@ let NOTIFY = "on";
 try {
   if (readFileSync(NOTIFY_FILE, "utf8").trim() === "off") NOTIFY = "off";
 } catch {}
+// ── 표시 방식: image(기본, 배터리 아이콘) / text(컴팩트 텍스트) — ~/.claude/swiftbar/.batt-display ──
+const DISPLAY_FILE = `${HOME}/.claude/swiftbar/.batt-display`;
+let DISPLAY = "image";
+try {
+  if (readFileSync(DISPLAY_FILE, "utf8").trim() === "text") DISPLAY = "text";
+} catch {}
 // macOS 알림 발사 (detached osascript, 메시지가 ps 프로세스 목록에 남지 않음) — 임계값 알림 + C5 소진 예측 알림 공용
 function fireNotification(msg) {
   try {
@@ -499,6 +505,21 @@ const fmtTok = (n) => {
 const hhmm = (epochSec) => {
   const d = new Date(epochSec * 1000);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+};
+// battItems([{label,remain}]) → 컴팩트 텍스트. 라벨 첫 글자(C/X)로 그룹핑(등장 순서 유지),
+// 그룹 내 값은 반올림된 remain을 · 로 연결 (remain==null → –). 그룹은 공백으로 연결.
+const compactBattText = (items) => {
+  const order = [];
+  const groups = {};
+  for (const it of items) {
+    const g = it.label[0];
+    if (!groups[g]) {
+      groups[g] = [];
+      order.push(g);
+    }
+    groups[g].push(it.remain == null ? "–" : String(Math.round(it.remain)));
+  }
+  return order.map((g) => g + groups[g].join("·")).join(" ");
 };
 
 // ── 1. Claude Code: 활성 5시간 블록 ────────────────────────
@@ -1005,7 +1026,11 @@ let c5ProjectionRow = null;
 // 잔량 숫자가 캡슐 안에 들어감 → 메뉴바는 이미지만. 라벨은 드롭다운 범례.
 // 둘 다 없으면(신규/양쪽 미사용) 배터리 대신 안내 아이콘.
 if (battItems.length) {
-  out.push(`| image=${renderBatteryImage(isDarkMode(), visibleItems)}`);
+  if (DISPLAY === "text") {
+    out.push(`${compactBattText(visibleItems)} | font=Menlo size=12`);
+  } else {
+    out.push(`| image=${renderBatteryImage(isDarkMode(), visibleItems)}`);
+  }
 } else {
   out.push("🔋 —");
 }
@@ -1164,6 +1189,18 @@ out.push(
       `-- ${active ? "✓ " : ""}${label} | bash=/bin/sh param1=-c param2="mkdir -p '${SETTINGS_DIR}' && echo ${val} > '${file}'" terminal=false refresh=true size=11 color=#8b949e`,
     );
   out.push("⚙️ 배터리 설정 | size=11 color=#8b949e");
+  settingRow(
+    "표시 방식: 배터리 이미지",
+    DISPLAY === "image",
+    DISPLAY_FILE,
+    "image",
+  );
+  settingRow(
+    "표시 방식: 컴팩트 텍스트",
+    DISPLAY === "text",
+    DISPLAY_FILE,
+    "text",
+  );
   settingRow("크기: 크게", SIZE === "big", SIZE_FILE, "big");
   settingRow("크기: 작게", SIZE === "small", SIZE_FILE, "small");
   const up = Math.min(200, SIZEPCT + 5);
