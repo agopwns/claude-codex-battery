@@ -221,6 +221,20 @@ try {
     .filter((k) => ALL_BATTS.includes(k));
   if (keys.length) SHOWSET = new Set(keys);
 } catch {}
+// ── 임계값 알림 켜짐/꺼짐: on(기본) / off — ~/.claude/swiftbar/.batt-notify ──
+const NOTIFY_FILE = `${HOME}/.claude/swiftbar/.batt-notify`;
+let NOTIFY = "on";
+try {
+  if (readFileSync(NOTIFY_FILE, "utf8").trim() === "off") NOTIFY = "off";
+} catch {}
+// 배터리 키 → 사람이 읽는 라벨 (설정 서브메뉴 + 알림 엔진 공용)
+const battLabels = {
+  c5: "Claude 5시간 (C5)",
+  cw: "Claude 주간 (CW)",
+  cf: "Fable 주간 (CF)",
+  x5: "Codex 5시간 (X5)",
+  xw: "Codex 주간 (XW)",
+};
 
 // 4x6 픽셀 폰트 (big 프리셋)
 const FONT46 = {
@@ -863,6 +877,68 @@ if (codex && (codex.primary || codex.secondary)) {
 const battKey = (label) => (label === "X" ? "x5" : label.toLowerCase());
 let visibleItems = battItems.filter((b) => SHOWSET.has(battKey(b.label)));
 if (!visibleItems.length) visibleItems = battItems;
+
+// ── 임계값 알림: 20%/10% 하향 돌파 + 리셋 회복(≥95%) macOS 알림 ──
+// 숨겨진 배터리도 포함해 battItems 전체를 대상으로 함 (표시 여부와 무관하게 쿼터는 실재)
+{
+  const NOTIFY_STATE_FILE = `${HOME}/.claude/swiftbar/.batt-notify-state.json`;
+  const zoneOf = (r) => (r <= 10 ? "low10" : r <= 20 ? "low20" : "ok");
+  const fireNotification = (msg) => {
+    try {
+      const esc = (s) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      const cmd = `osascript -e 'display notification "${esc(msg)}" with title "${esc("Claude·Codex Battery")}"'`;
+      const child = spawn("/bin/sh", ["-c", cmd], {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+    } catch {}
+  };
+  let notifyState = {};
+  try {
+    const parsed = JSON.parse(readFileSync(NOTIFY_STATE_FILE, "utf8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+      notifyState = parsed;
+  } catch {}
+  for (const item of battItems) {
+    if (item.remain == null) continue;
+    const key = battKey(item.label);
+    // Codex 창이 3시간+ 오래되면 리셋됐을 수 있어 판정 자체를 건너뜀 (오탐 방지, line ~983 staleWarn과 동일 기준)
+    if (
+      (key === "x5" || key === "xw") &&
+      codex &&
+      now - codex.measuredAt > 3 * 3600
+    )
+      continue;
+    const remain = Math.round(item.remain);
+    const zone = zoneOf(remain);
+    const prevZone = notifyState[key]?.zone || "ok";
+    if (zone !== prevZone && NOTIFY !== "off") {
+      const label = battLabels[key] || key;
+      if (prevZone === "ok" && zone === "low20") {
+        fireNotification(`⚠️ ${label} 잔량 ${remain}%`);
+      } else if (
+        (prevZone === "ok" || prevZone === "low20") &&
+        zone === "low10"
+      ) {
+        fireNotification(`🚨 ${label} 잔량 ${remain}%`);
+      } else if (
+        (prevZone === "low20" || prevZone === "low10") &&
+        zone === "ok" &&
+        remain >= 95
+      ) {
+        fireNotification(`🔋 ${label} 리셋 — 잔량 ${remain}%`);
+      }
+      // (low20|low10)→ok remain<95, low10→low20: 조용히 zone만 갱신(소음 방지)
+    }
+    notifyState[key] = { zone };
+  }
+  try {
+    mkdirSync(dirname(NOTIFY_STATE_FILE), { recursive: true });
+    writeFileSync(NOTIFY_STATE_FILE, JSON.stringify(notifyState));
+  } catch {}
+}
+
 // 잔량 숫자가 캡슐 안에 들어감 → 메뉴바는 이미지만. 라벨은 드롭다운 범례.
 // 둘 다 없으면(신규/양쪽 미사용) 배터리 대신 안내 아이콘.
 if (battItems.length) {
@@ -1040,13 +1116,6 @@ out.push(
     SCALE_FILE,
     String(down),
   );
-  const battLabels = {
-    c5: "Claude 5시간 (C5)",
-    cw: "Claude 주간 (CW)",
-    cf: "Fable 주간 (CF)",
-    x5: "Codex 5시간 (X5)",
-    xw: "Codex 주간 (XW)",
-  };
   for (const k of ALL_BATTS) {
     const on = SHOWSET.has(k);
     const next = ALL_BATTS.filter((b) => (b === k ? !on : SHOWSET.has(b)));
@@ -1057,6 +1126,12 @@ out.push(
       next.length ? next.join(",") : "none",
     );
   }
+  settingRow(
+    NOTIFY === "on" ? "알림: 켜짐 — 20%/10% 하향·리셋 회복 시" : "알림: 꺼짐",
+    NOTIFY === "on",
+    NOTIFY_FILE,
+    NOTIFY === "on" ? "off" : "on",
+  );
   settingRow("채움 색: 신호등", FILL === "traffic", FILL_FILE, "traffic");
   settingRow("채움 색: 흰색", FILL === "white", FILL_FILE, "white");
   settingRow("글자 색: 자동", TEXTCOL === "auto", TEXT_FILE, "auto");
