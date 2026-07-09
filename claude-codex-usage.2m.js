@@ -233,6 +233,13 @@ let DISPLAY = "image";
 try {
   if (readFileSync(DISPLAY_FILE, "utf8").trim() === "text") DISPLAY = "text";
 } catch {}
+// ── 월 예산(선택, USD) — ~/.claude/swiftbar/.batt-budget 에 손으로 양수 기록 (서브메뉴 없음). 0/미설정=기능 꺼짐 ──
+const BUDGET_FILE = `${HOME}/.claude/swiftbar/.batt-budget`;
+let BUDGET = 0;
+try {
+  const v = parseFloat(readFileSync(BUDGET_FILE, "utf8").trim());
+  if (Number.isFinite(v) && v > 0) BUDGET = v;
+} catch {}
 // macOS 알림 발사 (detached osascript, 메시지가 ps 프로세스 목록에 남지 않음) — 임계값 알림 + C5 소진 예측 알림 공용
 function fireNotification(msg) {
   try {
@@ -628,7 +635,9 @@ function upsertUsageHistory(cmodels) {
     return null;
   }
 }
-// 히스토리에서 이번 달·지난달 누적 비용 행 문자열 생성 (데이터 없으면 null)
+// 히스토리에서 이번 달·지난달 누적 비용 행 문자열 생성 (데이터 없으면 null).
+// BUDGET(> 0) 설정 시 "/ 예산 $B (P%)" 조각을 덧붙이고 임계값별로 색을 바꾼다.
+// 알림 판정(checkBudgetAlert)이 curSum을 재사용할 수 있도록 { row, curSum }로 반환.
 function monthlyUsageRow(hist) {
   if (!hist) return null;
   const d = new Date();
@@ -653,8 +662,49 @@ function monthlyUsageRow(hist) {
     }
   }
   let s = `이번 달 누적 $${curSum.toFixed(0)}`;
+  let color = "#8b949e";
+  if (BUDGET > 0) {
+    const pct = Math.round((curSum / BUDGET) * 100);
+    s += ` / 예산 $${BUDGET.toFixed(0)} (${pct}%)`;
+    color = pct >= 100 ? "#FF453A" : pct >= 80 ? "#d29922" : "#8b949e";
+  }
   if (prevHas) s += `  ·  지난달 $${prevSum.toFixed(0)}`;
-  return `${s} | size=11 color=#8b949e`;
+  return { row: `${s} | size=11 color=${color}`, curSum };
+}
+// 예산의 80%/100% 최초 돌파(상향만) 시 1회 알림. state 파일에 {month, zone}을 보관해
+// 같은 달 재돌파를 걸러내고, 달이 바뀌면 zone을 "ok"로 리셋한다. 하향 전이는 조용히 갱신만.
+// 렌더를 절대 막지 않도록 통째로 try/catch — 파일이 깨져 있으면 자가 복구.
+const BUDGET_STATE_FILE = `${HOME}/.claude/swiftbar/.batt-budget-state.json`;
+function checkBudgetAlert(curSum) {
+  try {
+    if (BUDGET <= 0) return;
+    const monthKey = localYmd().slice(0, 7); // "YYYY-MM"
+    let state = null;
+    try {
+      const parsed = JSON.parse(readFileSync(BUDGET_STATE_FILE, "utf8"));
+      if (parsed && typeof parsed === "object" && parsed.month && parsed.zone)
+        state = parsed;
+    } catch {}
+    if (!state || state.month !== monthKey)
+      state = { month: monthKey, zone: "ok" };
+    const pct = Math.round((curSum / BUDGET) * 100);
+    const zone = pct >= 100 ? "over100" : pct >= 80 ? "warn80" : "ok";
+    const order = { ok: 0, warn80: 1, over100: 2 };
+    if (order[zone] > order[state.zone] && NOTIFY !== "off") {
+      if (zone === "warn80") {
+        fireNotification(
+          `📊 이번 달 사용 $${curSum.toFixed(0)} — 예산의 ${pct}% 도달`,
+        );
+      } else if (zone === "over100") {
+        fireNotification(
+          `💸 이번 달 사용 $${curSum.toFixed(0)} — 예산 $${BUDGET.toFixed(0)} 초과`,
+        );
+      }
+    }
+    state.zone = zone;
+    mkdirSync(dirname(BUDGET_STATE_FILE), { recursive: true });
+    writeFileSync(BUDGET_STATE_FILE, JSON.stringify(state));
+  } catch {}
 }
 // 최근 7일(로컬 달력 기준, 오늘 포함) 일별 지출 막대 차트 행. 데이터 없으면(전부 null) null.
 // 막대 색: 오늘=진하게(다크/라이트 대비), 나머지 데이터일=회색, 결측일=흐린 회색 1px 스텁.
@@ -1134,8 +1184,11 @@ if (hasClaude) {
         `${label}▕${g}▏ $${m.cost.toFixed(1)}  ${fmtTok(m.tokens)} | font=Menlo`,
       );
     }
-    const monthRow = monthlyUsageRow(usageHist);
-    if (monthRow) out.push(monthRow);
+    const monthly = monthlyUsageRow(usageHist);
+    if (monthly) {
+      out.push(monthly.row);
+      if (BUDGET > 0) checkBudgetAlert(monthly.curSum);
+    }
     const sparkRow = sparklineRow(usageHist, dark);
     if (sparkRow) out.push(sparkRow);
   }
