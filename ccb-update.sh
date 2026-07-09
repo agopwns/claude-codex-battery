@@ -2,7 +2,7 @@
 # Claude & Codex Usage Battery — self-update
 # 위젯 드롭다운의 "🆕 업데이트"에서 호출됨. 최신 스크립트를 내려받아 제자리 교체.
 set -e
-RAW="https://raw.githubusercontent.com/dennykim123/claude-codex-battery/main"
+RAW="https://raw.githubusercontent.com/agopwns/claude-codex-battery/main"
 DEST_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEST="$DEST_DIR/claude-codex-usage.2m.js"
 BUN="$(command -v bun || echo "$HOME/.bun/bin/bun")"
