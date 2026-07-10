@@ -48,7 +48,7 @@ const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
 // ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.12.0";
+const VERSION = "1.13.0";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/agopwns/claude-codex-battery/main";
@@ -803,6 +803,70 @@ function monthlyLandingRow(hist, curSum) {
     return null;
   }
 }
+// ── 모델 믹스 트렌드: 최근 7일 vs 직전 7일 모델 계열별 비용 비중 변화 ──
+// 히스토리에는 모델별 비용만 있으므로(토큰 없음) "효율"이 아닌 "비용 믹스"로만 표현한다.
+// 모델명 세부 버전이 바뀌어도 계열로 묶이도록 정규화.
+function normalizeModelFamily(name) {
+  const n = (name || "").toLowerCase();
+  if (n.includes("fable")) return "Fable";
+  if (n.includes("opus")) return "Opus";
+  if (n.includes("sonnet")) return "Sonnet";
+  if (n.includes("haiku")) return "Haiku";
+  if (n.startsWith("gpt") || n.includes("codex")) return "GPT";
+  return shortModel(name);
+}
+// 오늘로부터 fromOffset~toOffset일 전 구간의 계열별 비용 합산 (fromOffset ≥ toOffset)
+function aggregateModelCosts(hist, fromOffset, toOffset) {
+  const agg = {};
+  let total = 0,
+    days = 0;
+  for (let i = fromOffset; i >= toOffset; i--) {
+    const day = hist[localYmd(new Date(Date.now() - i * 86400e3))];
+    if (!day || !day.models) continue;
+    days++;
+    for (const [name, cost] of Object.entries(day.models)) {
+      if (!(cost > 0)) continue;
+      const fam = normalizeModelFamily(name);
+      agg[fam] = (agg[fam] || 0) + cost;
+      total += cost;
+    }
+  }
+  return { agg, total, days };
+}
+// 접힌 서브메뉴 행 배열 반환 (부모 행 + "--" 자식 상위 3개). 데이터일 3개 미만이면 null.
+function modelMixRows(hist) {
+  try {
+    const cur = aggregateModelCosts(hist, 6, 0); // 최근 7일 (오늘 포함)
+    const prev = aggregateModelCosts(hist, 13, 7); // 직전 7일
+    if (cur.days < 3 || cur.total <= 0) return null;
+    const rows = [
+      `모델 믹스 — 최근 7일 $${cur.total.toFixed(0)} | size=11 color=#8b949e`,
+    ];
+    const top = Object.entries(cur.agg)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3);
+    for (const [fam, cost] of top) {
+      const share = (cost / cur.total) * 100;
+      let delta = "직전 7일 데이터 없음";
+      let dcolor = "#8b949e";
+      if (prev.total > 0) {
+        const d = share - ((prev.agg[fam] || 0) / prev.total) * 100;
+        if (Math.abs(d) < 1) delta = "≈ 직전 7일과 비슷";
+        else {
+          delta = `직전 7일 대비 ${d > 0 ? "↑" : "↓"}${Math.abs(d).toFixed(0)}%p`;
+          dcolor = d > 0 ? "#d29922" : "#3fb950"; // 비중 증가=주의색 (비싼 계열 쏠림 감지용)
+        }
+      }
+      rows.push(
+        `-- ${fam.padEnd(7, " ")} ${String(Math.round(share)).padStart(3, " ")}%  $${cost.toFixed(0)}  ·  ${delta} | font=Menlo size=11 color=${dcolor}`,
+      );
+    }
+    return rows;
+  } catch {
+    return null;
+  }
+}
+
 // 런어웨이 지출 감지: 오늘 누적이 최근 28 완료일의 정상 상단(max(P90, 중앙값+k×MAD))을
 // 절대 초과액(minExcess)과 함께 넘으면 이상 판정 — 폭주 에이전트·과도한 모델 사용 조기 경고.
 // 감도: .batt-anomaly = off | normal(k=3, +$25) | sensitive(k=2, +$10). 완료일 7개 미만이면 판정 안 함.
@@ -1531,6 +1595,8 @@ if (hasClaude) {
     }
     const sparkRow = sparklineRow(usageHist, dark);
     if (sparkRow) out.push(sparkRow);
+    const mixRows = modelMixRows(usageHist);
+    if (mixRows) out.push(...mixRows);
   }
   out.push("---");
 }
