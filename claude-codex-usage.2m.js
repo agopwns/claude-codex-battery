@@ -48,7 +48,7 @@ const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
 // ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.13.0";
+const VERSION = "1.14.0";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/agopwns/claude-codex-battery/main";
@@ -1497,6 +1497,73 @@ function speechBubbleRow() {
   return { msg: "오늘도 무사히 굴러가는 중이에요 🛞", pri: 7 };
 }
 
+// ── 리셋 타임라인: 모든 배터리의 다음 리셋을 임박 순 한 줄로. C5·CW·X5·XW 행을 따로 읽지 않아도
+// 헤비 작업 재개 시점을 잡을 수 있게. 잔량 20% 이하 배터리는 리셋 15분 전 1회 알림(리셋 시각당 1회).
+const RESET_REMINDER_STATE_FILE = `${HOME}/.claude/swiftbar/.batt-reset-reminder-state.json`;
+function resetTimelineRow() {
+  try {
+    const items = [];
+    if (cusage) {
+      const push = (key, w) => {
+        if (w && typeof w.resetsAt === "number" && w.resetsAt > now)
+          items.push({ key, at: w.resetsAt, remain: rem(w.pct) });
+      };
+      push("c5", cusage.fiveHour);
+      push("cw", cusage.weekly);
+      push("cf", cusage.fable);
+    }
+    // Codex 3h+ 스테일이면 리셋 시각을 신뢰할 수 없음 — 타임라인·알림 모두 제외 (기존 패턴)
+    if (codex && now - codex.measuredAt <= 3 * 3600) {
+      const p = windowState(codex.primary);
+      const s = windowState(codex.secondary);
+      if (p && !p.stale && p.resetsIn > 0)
+        items.push({
+          key: "x5",
+          at: now + p.resetsIn,
+          remain: Math.max(0, 100 - p.pct),
+        });
+      if (s && !s.stale && s.resetsIn > 0)
+        items.push({
+          key: "xw",
+          at: now + s.resetsIn,
+          remain: Math.max(0, 100 - s.pct),
+        });
+    }
+    if (!items.length) return null;
+    items.sort((a, b) => a.at - b.at);
+    // 리셋 임박 알림 — 같은 리셋 시각에 한 번만 (.batt-reset-reminder-state.json에 배터리별 마지막 resetAt)
+    try {
+      let st = {};
+      try {
+        const parsed = JSON.parse(
+          readFileSync(RESET_REMINDER_STATE_FILE, "utf8"),
+        );
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+          st = parsed;
+      } catch {}
+      let changed = false;
+      for (const it of items) {
+        if (it.remain == null || it.remain > 20) continue;
+        const secs = it.at - now;
+        if (secs > 15 * 60 || st[it.key] === it.at) continue;
+        if (NOTIFY !== "off")
+          fireNotification(
+            `🔜 ${battLabels[it.key] || it.key} 리셋 ${fmtDur(secs)} 후 — 헤비 작업 재개 준비`,
+          );
+        st[it.key] = it.at;
+        changed = true;
+      }
+      if (changed) {
+        mkdirSync(dirname(RESET_REMINDER_STATE_FILE), { recursive: true });
+        writeFileSync(RESET_REMINDER_STATE_FILE, JSON.stringify(st));
+      }
+    } catch {}
+    return `다음 회복  ${items.map((i) => `${i.key.toUpperCase()} ${fmtDur(i.at - now)}`).join(" → ")} | font=Menlo size=11 color=#8b949e`;
+  } catch {
+    return null;
+  }
+}
+
 // 잔량 숫자가 캡슐 안에 들어감 → 메뉴바는 이미지만. 라벨은 드롭다운 범례.
 // 둘 다 없으면(신규/양쪽 미사용) 배터리 대신 안내 아이콘.
 const dark = isDarkMode(); // 배터리 아이콘 + 스파크라인 공용 — 매번 다시 조회하지 않는다
@@ -1521,6 +1588,8 @@ if (legendParts.length) {
   out.push(
     `🔋 남은 %  ·  ${legendParts.join("  ·  ")} | size=11 color=#8b949e`,
   );
+  const resetRow = resetTimelineRow();
+  if (resetRow) out.push(resetRow);
   const bubble = speechBubbleRow();
   if (bubble) out.push(`💬 ${bubble.msg} | size=12`);
   // 펫 플러그인(claude-pet.streamable.js)이 드롭다운·팝업에 재사용할 수 있도록 공유 파일에 기록
