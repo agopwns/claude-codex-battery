@@ -48,7 +48,7 @@ const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
 // ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.10.0";
+const VERSION = "1.11.0";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/agopwns/claude-codex-battery/main";
@@ -778,6 +778,74 @@ function monthlyLandingRow(hist, curSum) {
     return null;
   }
 }
+// 런어웨이 지출 감지: 오늘 누적이 최근 28 완료일의 정상 상단(max(P90, 중앙값+k×MAD))을
+// 절대 초과액(minExcess)과 함께 넘으면 이상 판정 — 폭주 에이전트·과도한 모델 사용 조기 경고.
+// 감도: .batt-anomaly = off | normal(k=3, +$25) | sensitive(k=2, +$10). 완료일 7개 미만이면 판정 안 함.
+const ANOMALY_FILE = `${HOME}/.claude/swiftbar/.batt-anomaly`;
+const ANOMALY_STATE_FILE = `${HOME}/.claude/swiftbar/.batt-anomaly-state.json`;
+let ANOMALY = "normal";
+try {
+  const v = readFileSync(ANOMALY_FILE, "utf8").trim();
+  if (["off", "normal", "sensitive"].includes(v)) ANOMALY = v;
+} catch {}
+function runawayRow(hist, cmodels) {
+  try {
+    if (ANOMALY === "off") return null;
+    const todayCost = hist[localYmd()]?.cost;
+    if (typeof todayCost !== "number") return null;
+    const done = [];
+    for (let i = 1; i <= 28; i++) {
+      const key = localYmd(new Date(Date.now() - i * 86400e3));
+      if (hist[key] && typeof hist[key].cost === "number")
+        done.push(hist[key].cost);
+    }
+    if (done.length < 7) return null;
+    const sorted = [...done].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    const median =
+      sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    const absDev = sorted
+      .map((v) => Math.abs(v - median))
+      .sort((a, b) => a - b);
+    const dMid = Math.floor(absDev.length / 2);
+    const mad =
+      absDev.length % 2 ? absDev[dMid] : (absDev[dMid - 1] + absDev[dMid]) / 2;
+    const p90 =
+      sorted[Math.min(sorted.length - 1, Math.floor(0.9 * sorted.length))];
+    const k = ANOMALY === "sensitive" ? 2 : 3;
+    const minExcess = ANOMALY === "sensitive" ? 10 : 25;
+    const upper = Math.max(p90, median + k * mad);
+    if (todayCost <= upper + minExcess) return null;
+    // 원인 힌트: 오늘 최고 비용 모델의 비중
+    let hint = "";
+    if (cmodels?.models?.length && cmodels.total > 0) {
+      const top = cmodels.models[0];
+      hint = ` — ${shortModel(top.name)} ${Math.round((top.cost / cmodels.total) * 100)}%`;
+    }
+    // 하루 1회 알림 (.batt-anomaly-state.json, 날짜 바뀌면 리셋)
+    try {
+      const today = localYmd();
+      let st = null;
+      try {
+        const p = JSON.parse(readFileSync(ANOMALY_STATE_FILE, "utf8"));
+        if (p && typeof p === "object" && p.date) st = p;
+      } catch {}
+      if (!st || st.date !== today) st = { date: today, notified: false };
+      if (!st.notified) {
+        if (NOTIFY !== "off")
+          fireNotification(
+            `🚨 오늘 지출 $${todayCost.toFixed(0)} — 평소 상단 $${upper.toFixed(0)} 초과${hint}`,
+          );
+        st.notified = true;
+      }
+      mkdirSync(dirname(ANOMALY_STATE_FILE), { recursive: true });
+      writeFileSync(ANOMALY_STATE_FILE, JSON.stringify(st));
+    } catch {}
+    return `⚠ 오늘 $${todayCost.toFixed(0)} · 평소 상단 $${upper.toFixed(0)}${hint} — 평소 범위 크게 초과 | size=11 color=#FF453A`;
+  } catch {
+    return null;
+  }
+}
 // 최근 7일(로컬 달력 기준, 오늘 포함) 일별 지출 막대 차트 행. 데이터 없으면(전부 null) null.
 // 막대 색: 오늘=진하게(다크/라이트 대비), 나머지 데이터일=회색, 결측일=흐린 회색 1px 스텁.
 // 차트 버그가 드롭다운 전체를 죽이면 안 되므로 통째로 try/catch.
@@ -1381,6 +1449,8 @@ if (legendParts.length) {
 // Claude 상세 — hasClaude일 때만 (Claude Code 안 쓰면 섹션 자체 생략)
 if (hasClaude) {
   out.push("Claude Code | size=13 color=#8b949e");
+  const runaway = runawayRow(usageHist, cmodels);
+  if (runaway) out.push(runaway);
   if (cusage) {
     const winRow = (label, w) => {
       if (!w) return;
@@ -1597,6 +1667,19 @@ out.push(
     NOTIFY_FILE,
     NOTIFY === "on" ? "off" : "on",
   );
+  settingRow(
+    "지출 이상 감지: 보통",
+    ANOMALY === "normal",
+    ANOMALY_FILE,
+    "normal",
+  );
+  settingRow(
+    "지출 이상 감지: 민감",
+    ANOMALY === "sensitive",
+    ANOMALY_FILE,
+    "sensitive",
+  );
+  settingRow("지출 이상 감지: 끄기", ANOMALY === "off", ANOMALY_FILE, "off");
   settingRow("채움 색: 신호등", FILL === "traffic", FILL_FILE, "traffic");
   settingRow("채움 색: 흰색", FILL === "white", FILL_FILE, "white");
   settingRow("채움 색: 초록", FILL === "green", FILL_FILE, "green");
