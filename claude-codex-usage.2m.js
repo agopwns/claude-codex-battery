@@ -1340,6 +1340,16 @@ out.push(
   settingRow("글자 크기: 90%", FONTPCT === 90, FONT_FILE, "90");
   settingRow("글자 크기: 80%", FONTPCT === 80, FONT_FILE, "80");
   settingRow("글자 크기: 70%", FONTPCT === 70, FONT_FILE, "70");
+  // 펫 플러그인(claude-pet.streamable.js) 설치 여부에 따라 상태 행 노출 — 미설치면 행 자체를 생략
+  const PET_FILE = join(SELF_DIR, "claude-pet.streamable.js");
+  const PET_OFF_FILE = `${PET_FILE}.off`;
+  if (existsSync(PET_FILE)) {
+    out.push("-- 펫: 켜짐 — 끄려면 펫 드롭다운에서 | size=11 color=#8b949e");
+  } else if (existsSync(PET_OFF_FILE)) {
+    out.push(
+      `-- 펫: 꺼짐 — 클릭하면 켜기 | bash=/bin/mv param1="${PET_OFF_FILE}" param2="${PET_FILE}" terminal=false refresh=true size=11 color=#8b949e`,
+    );
+  }
 }
 out.push(
   `⭐ github.com/dennykim123/claude-codex-battery | href=https://github.com/dennykim123/claude-codex-battery size=11 color=#8b949e`,

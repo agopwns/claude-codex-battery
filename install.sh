@@ -42,6 +42,9 @@ PLUGIN_DIR="${SWIFTBAR_PLUGIN_DIR:-$HOME/.swiftbar-plugins}"
 mkdir -p "$PLUGIN_DIR"
 sed "1s|.*|#!$BUN|" claude-codex-usage.2m.js > "$PLUGIN_DIR/claude-codex-usage.2m.js"
 chmod +x "$PLUGIN_DIR/claude-codex-usage.2m.js"
+# 픽셀펫 스트리밍 플러그인도 동일하게 배치 (배터리 위젯과 독립 실행, 임포트 없음)
+sed "1s|.*|#!$BUN|" claude-pet.streamable.js > "$PLUGIN_DIR/claude-pet.streamable.js"
+chmod +x "$PLUGIN_DIR/claude-pet.streamable.js"
 # self-update 스크립트를 dot 파일로 배치 (SwiftBar가 플러그인으로 오인 실행하지 않도록)
 cp ccb-update.sh "$PLUGIN_DIR/.ccb-update.sh"
 chmod +x "$PLUGIN_DIR/.ccb-update.sh"
