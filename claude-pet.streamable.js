@@ -13,9 +13,6 @@ import { homedir } from "node:os";
 import zlib from "node:zlib";
 
 const HOME = homedir();
-// SELF_PATH = 설치된 실제 파일 경로 (SELF_DIR 패턴) — 펫 끄기 토글이 이 경로를 그대로 rename한다
-const SELF_PATH =
-  process.argv[1] || `${HOME}/.swiftbar-plugins/claude-pet.streamable.js`;
 const SETTINGS_DIR = `${HOME}/.claude/swiftbar`;
 const BURN_FILE = `${SETTINGS_DIR}/.batt-burn.json`;
 const SPECIES_FILE = `${SETTINGS_DIR}/.pet-species`;
@@ -862,9 +859,11 @@ function buildDropdown(state, species, bubbleMsg, bubbleSetting) {
   rows.push(
     `팝업 말풍선: ${bubbleSetting === "on" ? "켜짐" : "꺼짐"} | bash=/bin/sh param1=-c param2="mkdir -p '${SETTINGS_DIR}' && echo ${bubbleSetting === "on" ? "off" : "on"} > '${BUBBLE_SETTING_FILE}'" terminal=false refresh=false`,
   );
-  // 펫 끄기: 설치된 파일을 .off로 rename → SwiftBar가 무시. install.sh/main plugin이 다시 켜준다.
+  // 펫 끄기: SwiftBar의 DisabledPlugins 목록에 등록 (URL scheme). off 확장자로 rename하는 방식은
+  // SwiftBar가 그 파일도 그대로 실행해버리는 게 실측 확인되어 폐기 — 좀비 스트림 방지.
+  // refresh 불필요 — SwiftBar가 스트림 프로세스를 직접 종료한다.
   rows.push(
-    `펫 끄기 | bash=/bin/mv param1="${SELF_PATH}" param2="${SELF_PATH}.off" terminal=false refresh=true`,
+    "펫 끄기 | bash=/usr/bin/open param1=-g param2=swiftbar://disableplugin?name=claude-pet.streamable.js terminal=false",
   );
   return rows;
 }

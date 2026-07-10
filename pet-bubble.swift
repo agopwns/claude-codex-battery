@@ -4,6 +4,7 @@
 // 빌드: xcrun swiftc -O pet-bubble.swift -o pet-bubble
 
 import AppKit
+import ApplicationServices
 
 // ── 인자 파싱 ──
 let args = CommandLine.arguments
@@ -95,6 +96,75 @@ final class BubbleView: NSView {
   }
 }
 
+// ── AX 기반 펫 위치 탐지 ──
+// SwiftBar의 메뉴바 아이템 중 타이틀이 없고 너비가 22~42pt인 것(펫 아이콘, 보통 34pt)을 찾아
+// 그 중심 X좌표를 반환한다. 신뢰 안 됨/SwiftBar 없음/일치 아이템 없음 등 어느 단계에서든
+// 실패하면 nil을 반환하고, 호출부는 기존 고정 오프셋(xOffsetFromRight)으로 조용히 폴백한다.
+func axAttribute(_ element: AXUIElement, _ attribute: String) -> AnyObject? {
+  var value: AnyObject?
+  guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else {
+    return nil
+  }
+  return value
+}
+
+func axPoint(_ element: AXUIElement, _ attribute: String) -> CGPoint? {
+  guard let raw = axAttribute(element, attribute) else { return nil }
+  var point = CGPoint.zero
+  guard AXValueGetValue(raw as! AXValue, .cgPoint, &point) else { return nil }
+  return point
+}
+
+func axSize(_ element: AXUIElement, _ attribute: String) -> CGSize? {
+  guard let raw = axAttribute(element, attribute) else { return nil }
+  var size = CGSize.zero
+  guard AXValueGetValue(raw as! AXValue, .cgSize, &size) else { return nil }
+  return size
+}
+
+func findPetMenuBarItemCenterX() -> CGFloat? {
+  // 백그라운드 헬퍼라 권한 프롬프트는 절대 띄우지 않음 — prompt 옵션 없는 AXIsProcessTrusted()만 사용
+  guard AXIsProcessTrusted() else { return nil }
+
+  let apps = NSWorkspace.shared.runningApplications
+  guard
+    let swiftBar = apps.first(where: { $0.bundleIdentifier == "com.ameba.SwiftBar" })
+      ?? apps.first(where: { $0.localizedName == "SwiftBar" })
+  else {
+    return nil
+  }
+
+  let appElement = AXUIElementCreateApplication(swiftBar.processIdentifier)
+  guard let children = axAttribute(appElement, kAXChildrenAttribute as String) as? [AXUIElement] else {
+    return nil
+  }
+  let menuBars = children.filter {
+    (axAttribute($0, kAXRoleAttribute as String) as? String) == (kAXMenuBarRole as String)
+  }
+  guard !menuBars.isEmpty else { return nil }
+
+  // 후보: 타이틀 없음 + 너비 22...42pt. 그중 34pt(펫 아이콘 실측 폭)에 가장 가까운 것을 선택.
+  var best: (x: CGFloat, width: CGFloat)?
+  for menuBar in menuBars {
+    guard let items = axAttribute(menuBar, kAXChildrenAttribute as String) as? [AXUIElement] else { continue }
+    for item in items {
+      guard (axAttribute(item, kAXRoleAttribute as String) as? String) == (kAXMenuBarItemRole as String) else {
+        continue
+      }
+      let title = (axAttribute(item, kAXTitleAttribute as String) as? String) ?? ""
+      guard title.isEmpty else { continue }
+      guard let size = axSize(item, kAXSizeAttribute as String), size.width >= 22, size.width <= 42 else {
+        continue
+      }
+      guard let pos = axPoint(item, kAXPositionAttribute as String) else { continue }
+      if best == nil || abs(size.width - 34) < abs(best!.width - 34) {
+        best = (pos.x + size.width / 2, size.width)
+      }
+    }
+  }
+  return best?.x
+}
+
 // ── 앱 델리게이트: 패널 생성 + 페이드 인/아웃 애니메이션 ──
 final class AppDelegate: NSObject, NSApplicationDelegate {
   var panel: NSPanel?
@@ -112,7 +182,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     let screenFrame = screen.frame
     let visibleFrame = screen.visibleFrame
-    let x = screenFrame.maxX - totalWidth - xOffsetFromRight
+    let x: CGFloat
+    if let petCenterX = findPetMenuBarItemCenterX() {
+      // 꼬리는 말풍선 폭의 75% 지점에 있으므로, 그 지점이 펫 중심(petCenterX)에 오도록 배치
+      let raw = petCenterX - 0.75 * totalWidth
+      x = min(max(raw, visibleFrame.minX + 8), visibleFrame.maxX - totalWidth - 8)
+    } else {
+      x = screenFrame.maxX - totalWidth - xOffsetFromRight
+    }
     // 메뉴바 바로 아래: visibleFrame의 위쪽 경계가 메뉴바 하단
     let y = visibleFrame.maxY - totalHeight - 2
 

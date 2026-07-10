@@ -46,7 +46,7 @@ const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
 // ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.7.1";
+const VERSION = "1.7.2";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/agopwns/claude-codex-battery/main";
@@ -1421,15 +1421,24 @@ out.push(
   settingRow("글자 크기: 90%", FONTPCT === 90, FONT_FILE, "90");
   settingRow("글자 크기: 80%", FONTPCT === 80, FONT_FILE, "80");
   settingRow("글자 크기: 70%", FONTPCT === 70, FONT_FILE, "70");
-  // 펫 플러그인(claude-pet.streamable.js) 설치 여부에 따라 상태 행 노출 — 미설치면 행 자체를 생략
-  const PET_FILE = join(SELF_DIR, "claude-pet.streamable.js");
-  const PET_OFF_FILE = `${PET_FILE}.off`;
-  if (existsSync(PET_FILE)) {
-    out.push("-- 펫: 켜짐 — 끄려면 펫 드롭다운에서 | size=11 color=#8b949e");
-  } else if (existsSync(PET_OFF_FILE)) {
-    out.push(
-      `-- 펫: 꺼짐 — 클릭하면 켜기 | bash=/bin/mv param1="${PET_OFF_FILE}" param2="${PET_FILE}" terminal=false refresh=true size=11 color=#8b949e`,
+  // 펫 플러그인(claude-pet.streamable.js) 상태 행 — SwiftBar의 DisabledPlugins 목록으로 판정.
+  // 구 방식(off 확장자 rename 존재 여부 체크)은 폐기 — SwiftBar가 그 파일도 그대로 실행해버려 무의미했다.
+  const PET_FILE_NAME = "claude-pet.streamable.js";
+  let disabledPlugins = "";
+  try {
+    disabledPlugins = execSync(
+      "defaults read com.ameba.SwiftBar DisabledPlugins 2>/dev/null",
+      { encoding: "utf8", timeout: 3000 },
     );
+  } catch {
+    disabledPlugins = ""; // 조회 실패는 "꺼져있지 않음"으로 간주
+  }
+  if (disabledPlugins.includes(PET_FILE_NAME)) {
+    out.push(
+      `-- 펫: 꺼짐 — 클릭하면 켜기 | bash=/usr/bin/open param1=-g param2=swiftbar://enableplugin?name=${PET_FILE_NAME} terminal=false size=11 color=#8b949e`,
+    );
+  } else if (existsSync(join(SELF_DIR, PET_FILE_NAME))) {
+    out.push("-- 펫: 켜짐 — 끄려면 펫 드롭다운에서 | size=11 color=#8b949e");
   }
 }
 out.push(
