@@ -46,7 +46,7 @@ const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
 // ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.7.0";
+const VERSION = "1.7.1";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/agopwns/claude-codex-battery/main";
@@ -1132,28 +1132,37 @@ let c5DepleteT = null; // 말풍선용: 예상 소진 시각(epoch초)
 
 // ── 펫 말풍선: 데이터 기반 코멘트 한 줄 (우선순위 1~7, 첫 매치 채택) ──
 // 이번 실행에서 이미 계산된 값만 재사용(신규 파일 읽기·프로세스 실행 없음).
+// { msg, pri } 반환 — pri는 팝업 트리거(claude-pet.streamable.js)가 고우선순위(<=3)만 골라내는 데 사용.
 function speechBubbleRow() {
   if (!cusage && !cmodels) return null; // 데이터 자체가 없으면 행 생략
   if (c5Depleting && c5DepleteT != null) {
-    return `이 페이스면 ${hhmm(c5DepleteT)}에 방전이에요… 쉬엄쉬엄요 🥵`;
+    return {
+      msg: `이 페이스면 ${hhmm(c5DepleteT)}에 방전이에요… 쉬엄쉬엄요 🥵`,
+      pri: 1,
+    };
   }
   if (BUDGET > 0) {
     const monthly = monthlyUsageRow(usageHist);
     if (monthly && monthly.curSum / BUDGET >= 1) {
-      return "이번 달 예산을 넘겼어요 💸";
+      return { msg: "이번 달 예산을 넘겼어요 💸", pri: 2 };
     }
   }
-  if (worstZone === "low10") return "간식(쿼터)이 거의 없어요… 🥺";
-  if (worstZone === "low20") return "간식이 얼마 안 남았어요 🥺";
+  if (worstZone === "low10")
+    return { msg: "간식(쿼터)이 거의 없어요… 🥺", pri: 3 };
+  if (worstZone === "low20")
+    return { msg: "간식이 얼마 안 남았어요 🥺", pri: 4 };
   const c5Remain =
     cusage?.fiveHour?.pct != null ? 100 - cusage.fiveHour.pct : null;
   if (c5Remain != null && c5Remain >= 95) {
-    return "풀충전! 달릴 준비 됐어요 ⚡";
+    return { msg: "풀충전! 달릴 준비 됐어요 ⚡", pri: 5 };
   }
   if (c5Remain != null && c5Remain < 95 && cmodels?.total >= 100) {
-    return `열일 중… 오늘 벌써 $${Math.round(cmodels.total)} 태웠어요 🔥`;
+    return {
+      msg: `열일 중… 오늘 벌써 $${Math.round(cmodels.total)} 태웠어요 🔥`,
+      pri: 6,
+    };
   }
-  return "오늘도 무사히 굴러가는 중이에요 🛞";
+  return { msg: "오늘도 무사히 굴러가는 중이에요 🛞", pri: 7 };
 }
 
 // 잔량 숫자가 캡슐 안에 들어감 → 메뉴바는 이미지만. 라벨은 드롭다운 범례.
@@ -1180,8 +1189,19 @@ if (legendParts.length) {
   out.push(
     `🔋 남은 %  ·  ${legendParts.join("  ·  ")} | size=11 color=#8b949e`,
   );
-  const bubbleMsg = speechBubbleRow();
-  if (bubbleMsg) out.push(`💬 ${bubbleMsg} | size=12`);
+  const bubble = speechBubbleRow();
+  if (bubble) out.push(`💬 ${bubble.msg} | size=12`);
+  // 펫 플러그인(claude-pet.streamable.js)이 드롭다운·팝업에 재사용할 수 있도록 공유 파일에 기록
+  try {
+    if (bubble) {
+      const PET_BUBBLE_MSG_FILE = `${HOME}/.claude/swiftbar/.pet-bubble-msg.json`;
+      mkdirSync(dirname(PET_BUBBLE_MSG_FILE), { recursive: true });
+      writeFileSync(
+        PET_BUBBLE_MSG_FILE,
+        JSON.stringify({ msg: bubble.msg, pri: bubble.pri, t: now }),
+      );
+    }
+  } catch {}
   out.push("---");
 }
 

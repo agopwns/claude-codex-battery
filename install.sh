@@ -50,6 +50,19 @@ cp ccb-update.sh "$PLUGIN_DIR/.ccb-update.sh"
 chmod +x "$PLUGIN_DIR/.ccb-update.sh"
 echo "✅ 플러그인 배치: $PLUGIN_DIR"
 
+# 5b) 말풍선 팝업 헬퍼 컴파일 (선택 — Xcode CLT 없으면 팝업만 비활성, 드롭다운 말풍선은 정상)
+SWIFTBAR_STATE_DIR="$HOME/.claude/swiftbar"
+if command -v xcrun >/dev/null 2>&1 && xcrun -f swiftc >/dev/null 2>&1; then
+  mkdir -p "$SWIFTBAR_STATE_DIR"
+  if xcrun swiftc -O pet-bubble.swift -o "$SWIFTBAR_STATE_DIR/pet-bubble" 2>/dev/null; then
+    echo "✅ 팝업 말풍선 헬퍼 컴파일 완료: $SWIFTBAR_STATE_DIR/pet-bubble"
+  else
+    echo "ⓘ  팝업 말풍선 헬퍼 컴파일 실패 — 팝업 비활성 (드롭다운 말풍선은 정상 동작)"
+  fi
+else
+  echo "ⓘ swiftc 없음 — 팝업 말풍선 비활성 (Xcode CLT 설치 시 활성화)"
+fi
+
 # 6) SwiftBar에 폴더 지정 + 실행
 BID=$(defaults read /Applications/SwiftBar.app/Contents/Info CFBundleIdentifier 2>/dev/null || echo "com.ameba.SwiftBar")
 defaults write "$BID" PluginDirectory -string "$PLUGIN_DIR"

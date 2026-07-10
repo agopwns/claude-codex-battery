@@ -7,8 +7,8 @@
 // SwiftBar 스트리밍 플러그인: 배터리 위젯이 2분마다 남기는 .batt-burn.json을 읽어
 // 메뉴바에 픽셀아트 동물 펫을 그린다. 프로세스가 계속 살아서 ~~~ 로 프레임을 교체.
 
-import { execSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { execSync, spawn } from "node:child_process";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import zlib from "node:zlib";
 
@@ -19,6 +19,13 @@ const SELF_PATH =
 const SETTINGS_DIR = `${HOME}/.claude/swiftbar`;
 const BURN_FILE = `${SETTINGS_DIR}/.batt-burn.json`;
 const SPECIES_FILE = `${SETTINGS_DIR}/.pet-species`;
+// 말풍선 팝업(네이티브 NSPanel) 관련 경로 — 배터리 위젯(claude-codex-usage.2m.js)이 메시지를 남기고,
+// 이 펫 플러그인이 드롭다운 표시 + (조건부) 팝업 발사를 담당
+const BUBBLE_MSG_FILE = `${SETTINGS_DIR}/.pet-bubble-msg.json`;
+const BUBBLE_SHOWN_FILE = `${SETTINGS_DIR}/.pet-bubble-shown.json`;
+const BUBBLE_SETTING_FILE = `${SETTINGS_DIR}/.pet-bubble`;
+const BUBBLE_BIN = `${SETTINGS_DIR}/pet-bubble`;
+const BUBBLE_COOLDOWN_SEC = 600;
 
 // ══ PNG 인코더 (battery 플러그인과 동일한 순수 JS 구현, node:zlib만 사용) ══
 const CRC = (() => {
@@ -700,6 +707,54 @@ function readSpecies() {
   return "cat";
 }
 
+// ── 말풍선 팝업 설정: on(기본) / off — ~/.claude/swiftbar/.pet-bubble ──
+function readBubbleSetting() {
+  try {
+    if (readFileSync(BUBBLE_SETTING_FILE, "utf8").trim() === "off")
+      return "off";
+  } catch {}
+  return "on";
+}
+
+// 배터리 위젯이 남긴 최신 말풍선 메시지 { msg, pri, t } — 없거나 깨져 있으면 null
+function readBubbleMsg() {
+  try {
+    const parsed = JSON.parse(readFileSync(BUBBLE_MSG_FILE, "utf8"));
+    if (parsed && typeof parsed.msg === "string") return parsed;
+  } catch {}
+  return null;
+}
+
+// 네이티브 말풍선 팝업(NSPanel) 조건부 발사 — 고우선순위(방전/예산/쿼터, pri<=3) 또는
+// 펫 상태가 이번 프레임에 party로 막 전환됐을 때만. 같은 메시지는 10분 내 재발사하지 않는다.
+// 통째로 try/catch — 팝업 발사가 실패해도 드롭다운 루프는 계속돼야 한다.
+function maybeShowBubblePopup(bubbleSetting, bubbleData, justPartied) {
+  try {
+    if (bubbleSetting !== "on") return;
+    if (!existsSync(BUBBLE_BIN)) return;
+    const highPriority =
+      bubbleData && typeof bubbleData.pri === "number" && bubbleData.pri <= 3;
+    if (!highPriority && !justPartied) return;
+    const msg = justPartied ? "풀충전! 달릴 준비 됐어요 🎉" : bubbleData?.msg;
+    if (!msg) return;
+    let shown = null;
+    try {
+      const parsed = JSON.parse(readFileSync(BUBBLE_SHOWN_FILE, "utf8"));
+      if (parsed && typeof parsed === "object") shown = parsed;
+    } catch {}
+    const nowS = Math.floor(Date.now() / 1000);
+    if (
+      shown &&
+      shown.msg === msg &&
+      nowS - (shown.t || 0) < BUBBLE_COOLDOWN_SEC
+    )
+      return;
+    spawn(BUBBLE_BIN, [msg, "5"], { detached: true, stdio: "ignore" }).unref();
+    mkdirSync(SETTINGS_DIR, { recursive: true });
+    writeFileSync(BUBBLE_SHOWN_FILE, JSON.stringify({ msg, t: nowS }));
+  } catch {}
+}
+
 // ── 상태(state) 판정: .batt-burn.json 의 samples 배열에서 최근 2개로 판단 ──
 function readBurn() {
   try {
@@ -788,8 +843,10 @@ const STATUS_LABEL = {
   exhausted: "상태: 방전",
   party: "상태: 풀충전 축하!",
 };
-function buildDropdown(state, species) {
+function buildDropdown(state, species, bubbleMsg, bubbleSetting) {
   const rows = [];
+  // 말풍선: 배터리 위젯이 남긴 메시지가 있으면 드롭다운 맨 위에 노출 (상태 줄보다 먼저)
+  if (bubbleMsg) rows.push(`💬 ${bubbleMsg} | size=12`);
   rows.push(
     `${STATUS_LABEL[state] || "상태: 알 수 없음"} | size=12 color=#8b949e`,
   );
@@ -801,6 +858,10 @@ function buildDropdown(state, species) {
     );
   }
   rows.push("---");
+  // 팝업 말풍선 켜기/끄기 — 켜짐이면 클릭 시 off 기록, 꺼짐이면 클릭 시 on 기록 (동물 행과 동일한 bash 패턴)
+  rows.push(
+    `팝업 말풍선: ${bubbleSetting === "on" ? "켜짐" : "꺼짐"} | bash=/bin/sh param1=-c param2="mkdir -p '${SETTINGS_DIR}' && echo ${bubbleSetting === "on" ? "off" : "on"} > '${BUBBLE_SETTING_FILE}'" terminal=false refresh=false`,
+  );
   // 펫 끄기: 설치된 파일을 .off로 rename → SwiftBar가 무시. install.sh/main plugin이 다시 켜준다.
   rows.push(
     `펫 끄기 | bash=/bin/mv param1="${SELF_PATH}" param2="${SELF_PATH}.off" terminal=false refresh=true`,
@@ -810,6 +871,7 @@ function buildDropdown(state, species) {
 
 // ── 메인 스트리밍 루프 ──
 let tick = 0;
+let prevState = null; // party 전환 감지용 — 직전 프레임의 state
 async function loop() {
   while (true) {
     let waitMs = 5000;
@@ -819,10 +881,19 @@ async function loop() {
       const state = computeState(burn);
       const dark = isDarkMode();
       const img = getFrameBase64(species, state, tick, dark);
-      const lines = [`| image=${img}`, "---", ...buildDropdown(state, species)];
+      const bubbleData = readBubbleMsg();
+      const bubbleSetting = readBubbleSetting();
+      const justPartied = state === "party" && prevState !== "party";
+      maybeShowBubblePopup(bubbleSetting, bubbleData, justPartied);
+      const lines = [
+        `| image=${img}`,
+        "---",
+        ...buildDropdown(state, species, bubbleData?.msg, bubbleSetting),
+      ];
       console.log("~~~");
       console.log(lines.join("\n"));
       waitMs = intervalForState(state);
+      prevState = state;
     } catch {
       // 프레임 하나가 깨져도 루프는 계속 — 다음 틱에서 회복 시도
     }
