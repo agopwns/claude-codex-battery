@@ -48,7 +48,7 @@ const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
 // ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.8.0";
+const VERSION = "1.9.0";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/agopwns/claude-codex-battery/main";
@@ -1195,20 +1195,49 @@ let c5DepleteT = null; // 말풍선용: 예상 소진 시각(epoch초)
       if (state.samples.length >= 3 && last.t - first.t >= 15 * 60) {
         const rate = (first.remain - last.remain) / (last.t - first.t); // %/sec
         if (rate > 0) {
-          const depleteT = now + last.remain / rate;
-          if (depleteT < state.resetsAt) {
-            c5ProjectionRow = `      예상 소진 ${hhmm(depleteT)} ⚠️ 리셋(${hhmm(state.resetsAt)}) 전 소진 페이스 | font=Menlo size=11 color=#FF453A`;
+          // 페이스 코치: 실제 소진 속도 vs 안전 속도(지금 잔량을 리셋 시각에 딱 맞춰 소진하는 속도)
+          const actual = rate * 3600; // %p/h
+          const hoursLeft = Math.max(0.05, (state.resetsAt - now) / 3600);
+          const safe = last.remain / hoursLeft; // %p/h
+          const ratio = safe > 0 ? actual / safe : 0;
+          // 0.85~1.15 완충 구간(hot) — 계정 단위 수치의 짧은 출렁임이 safe↔critical을 오가지 않게
+          const zone =
+            ratio >= 1.15 ? "critical" : ratio >= 0.85 ? "hot" : "safe";
+          state.critStreak =
+            zone === "critical" ? (state.critStreak || 0) + 1 : 0;
+          const paceStr = `페이스 −${actual.toFixed(1)}%/h · 안전 −${safe.toFixed(1)}%/h`;
+          if (zone === "critical") {
+            const depleteT = now + (last.remain / actual) * 3600;
+            c5ProjectionRow = `      ${paceStr} (${ratio.toFixed(1)}×) ⚠️ 예상 소진 ${hhmm(depleteT)} · 리셋(${hhmm(state.resetsAt)}) 전 — ${(1 / ratio).toFixed(1)}×로 줄여야 | font=Menlo size=11 color=#FF453A`;
             c5Depleting = true;
             c5DepleteT = depleteT;
-            if (NOTIFY !== "off" && state.notifiedAt !== state.resetsAt) {
+            // 지속 2회(≈4분) 이상 critical일 때만 알림 — 순간 스파이크 오탐 방지
+            if (
+              NOTIFY !== "off" &&
+              state.critStreak >= 2 &&
+              state.notifiedAt !== state.resetsAt
+            ) {
               fireNotification(
-                `⏳ Claude 5시간 — 현재 페이스면 ${hhmm(depleteT)} 소진 (리셋 ${hhmm(state.resetsAt)} 전)`,
+                `⏳ Claude 5시간 — 페이스 ${actual.toFixed(1)}%/h(안전 ${safe.toFixed(1)}%/h) · ${hhmm(depleteT)} 소진 예상, 리셋 ${hhmm(state.resetsAt)} 전`,
               );
               state.notifiedAt = state.resetsAt;
             }
+          } else if (zone === "hot") {
+            c5ProjectionRow = `      ${paceStr} (${ratio.toFixed(1)}×) — 빠듯, 리셋 직전 소진 페이스 | font=Menlo size=11 color=#d29922`;
           } else {
-            c5ProjectionRow = `      페이스 −${(rate * 3600).toFixed(1)}%/h · 리셋까지 여유 | font=Menlo size=11 color=#8b949e`;
+            c5ProjectionRow = `      ${paceStr} — 여유 | font=Menlo size=11 color=#8b949e`;
           }
+          // 펫 등 다른 플러그인이 재계산 없이 쓰도록 pace로 공유 (samples는 그대로 — 하위 호환)
+          state.pace = {
+            actual: Math.round(actual * 10) / 10,
+            safe: Math.round(safe * 10) / 10,
+            ratio: Math.round(ratio * 100) / 100,
+            zone,
+            computedAt: now,
+          };
+        } else {
+          state.critStreak = 0;
+          state.pace = null;
         }
       }
       mkdirSync(dirname(BURN_FILE), { recursive: true });
