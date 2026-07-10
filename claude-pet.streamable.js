@@ -29,6 +29,17 @@ const BUBBLE_COOLDOWN_SEC = 600;
 const EVENTS_FILE = `${SETTINGS_DIR}/.pet-events.json`;
 const EVENT_SEEN_FILE = `${SETTINGS_DIR}/.pet-event-seen.json`;
 
+// ── 폴링·상태별 프레임 간격 (WindowServer 재합성 빈도 제어) ──
+const POLL_INTERVAL_MS = 1000;
+const STATE_FRAME_INTERVAL_MS = {
+  working: 2000,
+  idle: 4000,
+  sleep: 8000,
+  tired: Number.POSITIVE_INFINITY,
+  exhausted: Number.POSITIVE_INFINITY,
+  party: 1000,
+};
+
 // ══ PNG 인코더 (battery 플러그인과 동일한 순수 JS 구현, node:zlib만 사용) ══
 const CRC = (() => {
   const t = new Uint32Array(256);
@@ -983,10 +994,8 @@ function computeState(burn) {
   if (last && nowS - last.t <= 25 * 60) return "idle";
   return "sleep";
 }
-function intervalForState(state) {
-  if (state === "working" || state === "party") return 1000;
-  if (state === "idle" || state === "tired") return 2000;
-  return 5000; // exhausted, sleep
+function frameIntervalForState(state) {
+  return STATE_FRAME_INTERVAL_MS[state] ?? STATE_FRAME_INTERVAL_MS.sleep;
 }
 
 // state+tick → 어떤 스프라이트 그리드를 그릴지 선택 (2프레임 상태는 tick으로 교대)
@@ -1094,29 +1103,47 @@ function buildDropdown(
 
 // ── 메인 스트리밍 루프 ──
 let tick = 0;
-let prevState = null; // party 전환 감지용 — 직전 프레임의 state
+let prevState = null; // party 전환 감지용 — 직전 폴링의 state
+let prevFrameContext = null;
+let lastFrameAt = null;
+let lastOutput = null;
 async function loop() {
   while (true) {
-    let waitMs = 5000;
+    let waitMs = POLL_INTERVAL_MS;
     try {
+      const nowMs = Date.now();
       const species = readSpecies();
       const burn = readBurn();
       let state = computeState(burn);
       // 이벤트 오버라이드: 유효한 이벤트가 있으면 durMs 동안 기존 상태를 이벤트 애니메이션으로 교체
       pollEvent();
       let eventLabel = null;
-      let eventInterval = null;
-      if (activeEvent && Date.now() < activeEvent.until) {
-        const fx = EVENT_FX[activeEvent.type];
-        state = fx.states[tick % fx.states.length];
-        eventLabel = fx.label;
-        eventInterval = fx.intervalMs;
+      let eventFx = null;
+      let frameContext = `state:${state}`;
+      if (activeEvent && nowMs < activeEvent.until) {
+        eventFx = EVENT_FX[activeEvent.type];
+        eventLabel = eventFx.label;
+        frameContext = `event:${activeEvent.type}`;
       } else {
         activeEvent = null;
       }
+      const frameIntervalMs =
+        eventFx?.intervalMs ?? frameIntervalForState(state);
+      // 상태 파일은 1초마다 확인하되, 짧은 이벤트 애니메이션 중에만 폴링도 프레임 간격으로 단축한다.
+      waitMs = Math.min(POLL_INTERVAL_MS, frameIntervalMs);
+      const firstFrame = lastFrameAt === null;
+      const frameContextChanged =
+        prevFrameContext !== null && frameContext !== prevFrameContext;
+      const frameDue =
+        firstFrame ||
+        frameContextChanged ||
+        nowMs - lastFrameAt >= frameIntervalMs;
+      const nextTick = frameDue && !firstFrame ? tick + 1 : tick;
+      if (eventFx)
+        state = eventFx.states[nextTick % eventFx.states.length];
       const dark = isDarkMode();
       const petScalePct = readPetScale();
-      const img = getFrameBase64(species, state, tick, dark, petScalePct);
+      const img = getFrameBase64(species, state, nextTick, dark, petScalePct);
       const bubbleData = readBubbleMsg();
       const bubbleSetting = readBubbleSetting();
       const justPartied = state === "party" && prevState !== "party";
@@ -1133,14 +1160,18 @@ async function loop() {
           eventLabel,
         ),
       ];
-      console.log("~~~");
-      console.log(lines.join("\n"));
-      waitMs = eventInterval ?? intervalForState(state);
+      const output = lines.join("\n");
+      if (output !== lastOutput) {
+        console.log(`~~~\n${output}`);
+        lastOutput = output;
+      }
+      tick = nextTick;
+      if (frameDue) lastFrameAt = nowMs;
+      prevFrameContext = frameContext;
       prevState = state;
     } catch {
       // 프레임 하나가 깨져도 루프는 계속 — 다음 틱에서 회복 시도
     }
-    tick++;
     await new Promise((r) => setTimeout(r, waitMs));
   }
 }
