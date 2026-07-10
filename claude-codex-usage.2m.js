@@ -182,11 +182,12 @@ let SIZE = "big";
 try {
   if (readFileSync(SIZE_FILE, "utf8").trim() === "small") SIZE = "small";
 } catch {}
-// ── 채움 색: traffic(신호등, 기본) / white — ~/.claude/swiftbar/.batt-fill ──
+// ── 채움 색: traffic(신호등, 기본) / white / green(게임보이) / neon(시안) — ~/.claude/swiftbar/.batt-fill ──
 const FILL_FILE = `${HOME}/.claude/swiftbar/.batt-fill`;
 let FILL = "traffic";
 try {
-  if (readFileSync(FILL_FILE, "utf8").trim() === "white") FILL = "white";
+  const v = readFileSync(FILL_FILE, "utf8").trim();
+  if (["white", "green", "neon"].includes(v)) FILL = v;
 } catch {}
 // ── 글자 크기: 70/80/90/100% — ~/.claude/swiftbar/.batt-font (그 외 값·파일 없음은 100%로 폴백) ──
 const FONT_FILE = `${HOME}/.claude/swiftbar/.batt-font`;
@@ -374,12 +375,21 @@ function drawCapsule(cv, x, midY, remain, ink, dark) {
     const v = Math.max(0, Math.min(100, remain));
     const fw = Math.round((v / 100) * innerW);
     // 채움 색: traffic(기본)=신호등 system color, white=다크에서 흰색·라이트에서 진회색(가독성 유지)
+    // green=게임보이 감성 녹색, neon=시안 네온
     const fillCol =
       FILL === "white"
         ? dark
           ? [255, 255, 255]
           : [60, 60, 60]
-        : heatRemain(remain, dark);
+        : FILL === "green"
+          ? dark
+            ? [120, 200, 80]
+            : [60, 140, 40]
+          : FILL === "neon"
+            ? dark
+              ? [10, 230, 230]
+              : [0, 150, 160]
+            : heatRemain(remain, dark);
     if (fw > 0) _rect(cv, x + 2, by + 2, fw, bh - 4, fillCol);
     // 빈 구간 트랙: 반투명 오버레이로 대비 확보 (macOS 시스템 배터리 아이콘 스타일)
     const trackCol = dark ? [255, 255, 255, 90] : [0, 0, 0, 50];
@@ -1284,6 +1294,11 @@ out.push(
     out.push(
       `-- ${active ? "✓ " : ""}${label} | bash=/bin/sh param1=-c param2="mkdir -p '${SETTINGS_DIR}' && echo ${val} > '${file}'" terminal=false refresh=true size=11 color=#8b949e`,
     );
+  // 테마 프리셋: 채움 색·글자 색·글자 크기를 한 번에 세팅하는 원클릭 행 (✓ 로직 없음 — 프리셋은 상태가 아니라 동작)
+  const themeRow = (label, { fill, text, font }) =>
+    out.push(
+      `-- ${label} | bash=/bin/sh param1=-c param2="mkdir -p '${SETTINGS_DIR}' && echo ${fill} > '${FILL_FILE}' && echo ${text} > '${TEXT_FILE}' && echo ${font} > '${FONT_FILE}'" terminal=false refresh=true size=11 color=#8b949e`,
+    );
   out.push("⚙️ 배터리 설정 | size=11 color=#8b949e");
   settingRow(
     "표시 방식: 배터리 이미지",
@@ -1297,6 +1312,15 @@ out.push(
     DISPLAY_FILE,
     "text",
   );
+  out.push("-- 🎨 테마 프리셋 | size=11 color=#8b949e");
+  themeRow("테마: 미니멀", { fill: "white", text: "auto", font: "80" });
+  themeRow("테마: 신호등 클래식", {
+    fill: "traffic",
+    text: "auto",
+    font: "90",
+  });
+  themeRow("테마: 게임보이", { fill: "green", text: "black", font: "90" });
+  themeRow("테마: 네온", { fill: "neon", text: "black", font: "90" });
   settingRow("크기: 크게", SIZE === "big", SIZE_FILE, "big");
   settingRow("크기: 작게", SIZE === "small", SIZE_FILE, "small");
   const up = Math.min(200, SIZEPCT + 5);
@@ -1331,6 +1355,8 @@ out.push(
   );
   settingRow("채움 색: 신호등", FILL === "traffic", FILL_FILE, "traffic");
   settingRow("채움 색: 흰색", FILL === "white", FILL_FILE, "white");
+  settingRow("채움 색: 초록", FILL === "green", FILL_FILE, "green");
+  settingRow("채움 색: 네온", FILL === "neon", FILL_FILE, "neon");
   settingRow("글자 색: 자동", TEXTCOL === "auto", TEXT_FILE, "auto");
   settingRow("글자 색: 검정", TEXTCOL === "black", TEXT_FILE, "black");
   settingRow("글자 색: 흰색", TEXTCOL === "white", TEXT_FILE, "white");
