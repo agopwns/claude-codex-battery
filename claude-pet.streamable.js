@@ -24,6 +24,10 @@ const BUBBLE_SHOWN_FILE = `${SETTINGS_DIR}/.pet-bubble-shown.json`;
 const BUBBLE_SETTING_FILE = `${SETTINGS_DIR}/.pet-bubble`;
 const BUBBLE_BIN = `${SETTINGS_DIR}/pet-bubble`;
 const BUBBLE_COOLDOWN_SEC = 600;
+// 이벤트 버스: 배터리 위젯이 순간 이벤트(리셋·예산 초과·지출 폭주)를 링으로 남기고,
+// 펫이 읽어 몇 초간 기본 상태를 이벤트 애니메이션으로 덮어쓴다. seen 파일로 중복 재생 방지.
+const EVENTS_FILE = `${SETTINGS_DIR}/.pet-events.json`;
+const EVENT_SEEN_FILE = `${SETTINGS_DIR}/.pet-event-seen.json`;
 
 // ══ PNG 인코더 (battery 플러그인과 동일한 순수 JS 구현, node:zlib만 사용) ══
 const CRC = (() => {
@@ -262,6 +266,37 @@ const SPRITES = {
         "................",
       ],
     ],
+    // rare: 세수(그루밍) — 앞발을 볼/귀에 번갈아 대는 2프레임
+    rare: [
+      [
+        "..........o..o..",
+        "..........#..#..",
+        "...........##...",
+        "..........####..",
+        ".o....########..",
+        ".#...#########..",
+        "..#.########....",
+        "...#########....",
+        "....########....",
+        ".....######.....",
+        "......##.##.....",
+        "................",
+      ],
+      [
+        "..........o..o..",
+        "..........#.##..",
+        "...........##...",
+        "..........##.#..",
+        ".o....########..",
+        ".#...#########..",
+        "..#.########....",
+        "...#########....",
+        "....########....",
+        ".....######.....",
+        "......##.##.....",
+        "................",
+      ],
+    ],
   },
   hamster: {
     // run: 프레임0=다리 대각선으로 쭉 뻗음(질주), 프레임1=다리 모으고 몸 전체 1px 위로(바운스)
@@ -403,6 +438,37 @@ const SPRITES = {
         "................",
       ],
     ],
+    // rare: 볼 빵빵 — 간식을 볼주머니에 채워 볼이 부풀었다 줄었다 하는 2프레임
+    rare: [
+      [
+        "................",
+        "..........#..#..",
+        "...........##...",
+        "..........##.#..",
+        "......####ooo#..",
+        ".....####oo###..",
+        "....########....",
+        "...#########....",
+        "....########....",
+        ".....######.....",
+        ".....######.....",
+        "......##.##.....",
+      ],
+      [
+        "................",
+        "..........#..#..",
+        "...........##...",
+        "..........##.#..",
+        "......#####o##..",
+        ".....#########..",
+        "....########....",
+        "...#########....",
+        "....########....",
+        ".....######.....",
+        ".....######.....",
+        "......##.##.....",
+      ],
+    ],
   },
   rabbit: {
     // run: 프레임0=다리 대각선으로 쭉 뻗음(질주), 프레임1=다리 모으고 몸 전체 1px 위로(바운스)
@@ -541,6 +607,37 @@ const SPRITES = {
         "......##.##.....",
         "................",
         "................",
+        "................",
+      ],
+    ],
+    // rare: 빙키 점프 — 몸 전체 1px 위로 + 다리 웅크림(공중), 착지 프레임과 교대
+    rare: [
+      [
+        "...........#o...",
+        "...........##...",
+        "..........##.#..",
+        "......########..",
+        ".....#########..",
+        "....########....",
+        "...#########....",
+        "....########....",
+        ".....######.....",
+        "......#####.....",
+        "................",
+        "................",
+      ],
+      [
+        "...........##...",
+        "...........#o...",
+        "...........##...",
+        "..........##.#..",
+        "......########..",
+        ".....#########..",
+        "....########....",
+        "...#########....",
+        "....########....",
+        ".....######.....",
+        "......##.##.....",
         "................",
       ],
     ],
@@ -685,6 +782,37 @@ const SPRITES = {
         "................",
       ],
     ],
+    // rare: 등껍질 숨기 — 머리를 반쯤 넣었다(프레임0) 완전히 숨었다(프레임1) 하는 2프레임
+    rare: [
+      [
+        "................",
+        "................",
+        "................",
+        "................",
+        "......oooo......",
+        ".....oooooo#....",
+        "....ooooooo##...",
+        "....ooooooo.....",
+        "....########....",
+        ".....######.....",
+        "......##.##.....",
+        "................",
+      ],
+      [
+        "................",
+        "................",
+        "................",
+        "................",
+        "......oooo......",
+        ".....oooooo.....",
+        "....ooooooo.....",
+        "....ooooooo.....",
+        "....########....",
+        ".....######.....",
+        "......##.##.....",
+        "................",
+      ],
+    ],
   },
 };
 
@@ -769,6 +897,63 @@ function maybeShowBubblePopup(bubbleSetting, bubbleData, justPartied) {
   } catch {}
 }
 
+// ── 이벤트 소비: 링에서 아직 안 본(seen) 유효 이벤트 중 최우선 1개를 골라 activeEvent로 승격 ──
+// 같은 프레임에 여러 개가 밀려 있어도 전부 seen 처리 — 밀린 축하가 연달아 반복 재생되지 않게.
+// states: 재생 중 tick마다 순환할 기존 스프라이트 상태 (신규 스프라이트 QA 부담 없이 재조합)
+const EVENT_FX = {
+  "quota-reset": {
+    label: "이벤트: 쿼터 리셋 🎉",
+    states: ["party"],
+    intervalMs: 1000,
+    durMs: 8000,
+  },
+  "budget-over": {
+    label: "이벤트: 예산 초과 😰",
+    states: ["tired", "exhausted"],
+    intervalMs: 700,
+    durMs: 8000,
+  },
+  "spend-anomaly": {
+    label: "이벤트: 지출 폭주 🚨",
+    states: ["working"],
+    intervalMs: 500,
+    durMs: 8000,
+  },
+};
+let activeEvent = null; // { type, until(ms) }
+function pollEvent() {
+  try {
+    const nowS = Math.floor(Date.now() / 1000);
+    const ring = JSON.parse(readFileSync(EVENTS_FILE, "utf8"));
+    if (!Array.isArray(ring)) return;
+    let seen = {};
+    try {
+      const p = JSON.parse(readFileSync(EVENT_SEEN_FILE, "utf8"));
+      if (p && typeof p === "object" && !Array.isArray(p)) seen = p;
+    } catch {}
+    const fresh = ring.filter(
+      (e) => e && EVENT_FX[e.type] && e.expiresAt > nowS && !seen[e.id],
+    );
+    if (!fresh.length) return;
+    fresh.sort((a, b) => a.priority - b.priority || b.createdAt - a.createdAt);
+    for (const e of fresh) seen[e.id] = nowS;
+    for (const k of Object.keys(seen))
+      if (nowS - seen[k] > 86400) delete seen[k]; // 청소
+    mkdirSync(SETTINGS_DIR, { recursive: true });
+    writeFileSync(EVENT_SEEN_FILE, JSON.stringify(seen));
+    activeEvent = {
+      type: fresh[0].type,
+      until: Date.now() + EVENT_FX[fresh[0].type].durMs,
+    };
+  } catch {}
+}
+
+// ── 희귀 idle 행동: 15분 버킷 중 3의 배수 버킷의 첫 12초만 — 결정적(랜덤·파일쓰기 없음), 평균 45분당 1회 ──
+function rareIdleActive() {
+  const nowS = Math.floor(Date.now() / 1000);
+  return Math.floor(nowS / 900) % 3 === 0 && nowS % 900 < 12;
+}
+
 // ── 상태(state) 판정: .batt-burn.json 의 samples 배열에서 최근 2개로 판단 ──
 function readBurn() {
   try {
@@ -809,8 +994,12 @@ function pickFrame(species, state, tick) {
   const S = SPRITES[species];
   if (state === "working")
     return { grid: S.run[tick % 2], key: `run${tick % 2}` };
-  if (state === "idle")
+  if (state === "idle") {
+    // 한가할 때만 아주 가끔 종별 장난 행동 (고양이 세수·햄스터 볼 빵빵·거북이 등껍질·토끼 점프)
+    if (S.rare && rareIdleActive())
+      return { grid: S.rare[tick % 2], key: `rare${tick % 2}` };
     return { grid: S.idle[tick % 2], key: `idle${tick % 2}` };
+  }
   if (state === "sleep")
     return { grid: S.sleep[tick % 2], key: `sleep${tick % 2}` };
   if (state === "tired") return { grid: S.tired[0], key: "tired0" };
@@ -859,12 +1048,19 @@ const STATUS_LABEL = {
   exhausted: "상태: 방전",
   party: "상태: 풀충전 축하!",
 };
-function buildDropdown(state, species, bubbleMsg, bubbleSetting, petScalePct) {
+function buildDropdown(
+  state,
+  species,
+  bubbleMsg,
+  bubbleSetting,
+  petScalePct,
+  eventLabel,
+) {
   const rows = [];
   // 말풍선: 배터리 위젯이 남긴 메시지가 있으면 드롭다운 맨 위에 노출 (상태 줄보다 먼저)
   if (bubbleMsg) rows.push(`💬 ${bubbleMsg} | size=12`);
   rows.push(
-    `${STATUS_LABEL[state] || "상태: 알 수 없음"} | size=12 color=#8b949e`,
+    `${eventLabel || STATUS_LABEL[state] || "상태: 알 수 없음"} | size=12 color=#8b949e`,
   );
   rows.push("---");
   for (const sp of ALL_SPECIES) {
@@ -905,7 +1101,19 @@ async function loop() {
     try {
       const species = readSpecies();
       const burn = readBurn();
-      const state = computeState(burn);
+      let state = computeState(burn);
+      // 이벤트 오버라이드: 유효한 이벤트가 있으면 durMs 동안 기존 상태를 이벤트 애니메이션으로 교체
+      pollEvent();
+      let eventLabel = null;
+      let eventInterval = null;
+      if (activeEvent && Date.now() < activeEvent.until) {
+        const fx = EVENT_FX[activeEvent.type];
+        state = fx.states[tick % fx.states.length];
+        eventLabel = fx.label;
+        eventInterval = fx.intervalMs;
+      } else {
+        activeEvent = null;
+      }
       const dark = isDarkMode();
       const petScalePct = readPetScale();
       const img = getFrameBase64(species, state, tick, dark, petScalePct);
@@ -922,11 +1130,12 @@ async function loop() {
           bubbleData?.msg,
           bubbleSetting,
           petScalePct,
+          eventLabel,
         ),
       ];
       console.log("~~~");
       console.log(lines.join("\n"));
-      waitMs = intervalForState(state);
+      waitMs = eventInterval ?? intervalForState(state);
       prevState = state;
     } catch {
       // 프레임 하나가 깨져도 루프는 계속 — 다음 틱에서 회복 시도

@@ -9,7 +9,7 @@
 - [x] **쿼터 페이스 코치** (v1.9.0) — 실제 %p/h vs 안전 %p/h(잔량÷리셋까지 시간) 비교, safe/hot(0.85~1.15 완충)/critical 행 + "N×로 줄여야" 힌트, critical 2회 연속일 때만 알림(히스테리시스), `.batt-burn.json`에 `pace` 필드로 펫과 공유
 - [x] **월말 랜딩 예측 + 세이프 스펜드** (v1.10.0) — 최근 14일 완료일 중앙값 페이스로 "월말 예상 $X (페이스 $P/일) · 예산 ±$Y · 남은 하루 $Z" 행, 초과 페이스 최초 진입 시 월 1회 알림(래칫, `.batt-landing-state.json`). 완료일 5개 미만이면 숨김
 - [x] **런어웨이 지출 감지** (v1.11.0) — 최근 28 완료일 max(P90, 중앙값+k×MAD)+절대 초과액 기준 오늘 지출 이상치 판정, ⚠ 행 + 하루 1회 알림(`.batt-anomaly-state.json`), 최고 비용 모델 비중 힌트. 감도 `.batt-anomaly` off/normal(k=3,+$25)/sensitive(k=2,+$10) 설정 서브메뉴
-- [ ] **펫 이벤트 버스 + 종별 희귀 행동** (M–L) — 본체가 `.pet-events.json`에 순간 이벤트(quota-reset·budget-over·spend-anomaly 등) 기록, 펫이 5~10초 이벤트 애니메이션으로 덮어쓰기 + 종별 희귀 idle 행동(결정적 시간 버킷, 프레임당 랜덤 금지)
+- [x] **펫 이벤트 버스 + 종별 희귀 행동** (v1.12.0) — 본체가 `.pet-events.json` 링(10개)에 quota-reset·budget-over·spend-anomaly 발행(알림 off와 독립), 펫이 `.pet-event-seen.json` 중복 방지 후 8초 이벤트 애니메이션(기존 스프라이트 재조합: 리셋→party, 예산→tired/exhausted 교대, 폭주→고속 질주). 희귀 idle 행동 4종 신규 2프레임(고양이 세수·햄스터 볼 빵빵·거북이 등껍질·토끼 빙키 점프) — 15분 버킷 결정적 재생(평균 45분당 12초)
 
 ### 백로그 (이번 배치 제외)
 
