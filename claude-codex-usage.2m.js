@@ -1018,9 +1018,11 @@ if (!visibleItems.length) visibleItems = battItems;
 
 // ── 임계값 알림: 20%/10% 하향 돌파 + 리셋 회복(≥95%) macOS 알림 ──
 // 숨겨진 배터리도 포함해 battItems 전체를 대상으로 함 (표시 여부와 무관하게 쿼터는 실재)
+let worstZone = "ok"; // 말풍선용: 이번 실행에서 관측된 가장 나쁜 배터리 존
 {
   const NOTIFY_STATE_FILE = `${HOME}/.claude/swiftbar/.batt-notify-state.json`;
   const zoneOf = (r) => (r <= 10 ? "low10" : r <= 20 ? "low20" : "ok");
+  const zoneRank = { ok: 0, low20: 1, low10: 2 };
   let notifyState = {};
   try {
     const parsed = JSON.parse(readFileSync(NOTIFY_STATE_FILE, "utf8"));
@@ -1039,6 +1041,7 @@ if (!visibleItems.length) visibleItems = battItems;
       continue;
     const remain = Math.round(item.remain);
     const zone = zoneOf(remain);
+    if (zoneRank[zone] > zoneRank[worstZone]) worstZone = zone;
     const prevZone = notifyState[key]?.zone || "ok";
     if (zone !== prevZone && NOTIFY !== "off") {
       const label = battLabels[key] || key;
@@ -1069,6 +1072,8 @@ if (!visibleItems.length) visibleItems = battItems;
 // ── C5(Claude 5시간) 소진 페이스 예측: 최근 90분 샘플의 기울기로 리셋 전 소진 여부를 투영 ──
 const BURN_FILE = `${HOME}/.claude/swiftbar/.batt-burn.json`;
 let c5ProjectionRow = null;
+let c5Depleting = false; // 말풍선용: 리셋 전 소진 예측 여부
+let c5DepleteT = null; // 말풍선용: 예상 소진 시각(epoch초)
 {
   try {
     const w = cusage?.fiveHour;
@@ -1106,6 +1111,8 @@ let c5ProjectionRow = null;
           const depleteT = now + last.remain / rate;
           if (depleteT < state.resetsAt) {
             c5ProjectionRow = `      예상 소진 ${hhmm(depleteT)} ⚠️ 리셋(${hhmm(state.resetsAt)}) 전 소진 페이스 | font=Menlo size=11 color=#FF453A`;
+            c5Depleting = true;
+            c5DepleteT = depleteT;
             if (NOTIFY !== "off" && state.notifiedAt !== state.resetsAt) {
               fireNotification(
                 `⏳ Claude 5시간 — 현재 페이스면 ${hhmm(depleteT)} 소진 (리셋 ${hhmm(state.resetsAt)} 전)`,
@@ -1121,6 +1128,32 @@ let c5ProjectionRow = null;
       writeFileSync(BURN_FILE, JSON.stringify(state));
     }
   } catch {}
+}
+
+// ── 펫 말풍선: 데이터 기반 코멘트 한 줄 (우선순위 1~7, 첫 매치 채택) ──
+// 이번 실행에서 이미 계산된 값만 재사용(신규 파일 읽기·프로세스 실행 없음).
+function speechBubbleRow() {
+  if (!cusage && !cmodels) return null; // 데이터 자체가 없으면 행 생략
+  if (c5Depleting && c5DepleteT != null) {
+    return `이 페이스면 ${hhmm(c5DepleteT)}에 방전이에요… 쉬엄쉬엄요 🥵`;
+  }
+  if (BUDGET > 0) {
+    const monthly = monthlyUsageRow(usageHist);
+    if (monthly && monthly.curSum / BUDGET >= 1) {
+      return "이번 달 예산을 넘겼어요 💸";
+    }
+  }
+  if (worstZone === "low10") return "간식(쿼터)이 거의 없어요… 🥺";
+  if (worstZone === "low20") return "간식이 얼마 안 남았어요 🥺";
+  const c5Remain =
+    cusage?.fiveHour?.pct != null ? 100 - cusage.fiveHour.pct : null;
+  if (c5Remain != null && c5Remain >= 95) {
+    return "풀충전! 달릴 준비 됐어요 ⚡";
+  }
+  if (c5Remain != null && c5Remain < 95 && cmodels?.total >= 100) {
+    return `열일 중… 오늘 벌써 $${Math.round(cmodels.total)} 태웠어요 🔥`;
+  }
+  return "오늘도 무사히 굴러가는 중이에요 🛞";
 }
 
 // 잔량 숫자가 캡슐 안에 들어감 → 메뉴바는 이미지만. 라벨은 드롭다운 범례.
@@ -1147,6 +1180,8 @@ if (legendParts.length) {
   out.push(
     `🔋 남은 %  ·  ${legendParts.join("  ·  ")} | size=11 color=#8b949e`,
   );
+  const bubbleMsg = speechBubbleRow();
+  if (bubbleMsg) out.push(`💬 ${bubbleMsg} | size=12`);
   out.push("---");
 }
 
