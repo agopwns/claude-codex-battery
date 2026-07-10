@@ -46,7 +46,7 @@ const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
 // ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.7.3";
+const VERSION = "1.7.4";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/agopwns/claude-codex-battery/main";
@@ -617,16 +617,21 @@ function getClaudeModels() {
 const USAGE_HISTORY_FILE = `${HOME}/.claude/swiftbar/usage-history.json`;
 const localYmd = (d = new Date()) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-// cmodels(getClaudeModels 결과)를 오늘 키로 덮어쓰기 저장. 마지막 실행 값이 그날의 최종치가 된다.
-// 파일이 없거나 깨졌으면 {}부터 다시 시작(자가 복구). 400개 초과 시 오래된 날짜부터 정리.
-function upsertUsageHistory(cmodels) {
+// 히스토리 읽기 — 오늘 수집(getClaudeModels) 성공 여부와 무관하게 항상 시도.
+// ccusage가 일시적으로 죽어도 이미 쌓인 월 누적·스파크라인은 계속 보여야 한다.
+// 파일이 없거나 깨졌으면 {}부터 다시 시작(자가 복구).
+function readUsageHistory() {
   try {
-    let hist = {};
-    try {
-      const parsed = JSON.parse(readFileSync(USAGE_HISTORY_FILE, "utf8"));
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
-        hist = parsed;
-    } catch {}
+    const parsed = JSON.parse(readFileSync(USAGE_HISTORY_FILE, "utf8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+      return parsed;
+  } catch {}
+  return {};
+}
+// cmodels(getClaudeModels 결과)를 오늘 키로 덮어쓰기 저장. 마지막 실행 값이 그날의 최종치가 된다.
+// hist를 제자리 갱신하고 그대로 반환 — 쓰기 실패해도 메모리 값은 유효. 400개 초과 시 오래된 날짜부터 정리.
+function upsertUsageHistory(hist, cmodels) {
+  try {
     const models = {};
     let tokens = 0;
     for (const m of cmodels.models) {
@@ -640,16 +645,14 @@ function upsertUsageHistory(cmodels) {
     }
     mkdirSync(dirname(USAGE_HISTORY_FILE), { recursive: true });
     writeFileSync(USAGE_HISTORY_FILE, JSON.stringify(hist));
-    return hist;
-  } catch {
-    return null;
-  }
+  } catch {}
+  return hist;
 }
 // 히스토리에서 이번 달·지난달 누적 비용 행 문자열 생성 (데이터 없으면 null).
 // BUDGET(> 0) 설정 시 "/ 예산 $B (P%)" 조각을 덧붙이고 임계값별로 색을 바꾼다.
 // 알림 판정(checkBudgetAlert)이 curSum을 재사용할 수 있도록 { row, curSum }로 반환.
 function monthlyUsageRow(hist) {
-  if (!hist) return null;
+  if (!hist || !Object.keys(hist).length) return null;
   const d = new Date();
   const y = d.getFullYear(),
     mo = d.getMonth(); // 0-indexed
@@ -972,7 +975,9 @@ function maybeAutoRefreshCodex(codex) {
 const claude = getClaude();
 const cusage = getClaudeUsage();
 const cmodels = getClaudeModels();
-const usageHist = cmodels ? upsertUsageHistory(cmodels) : null;
+// 읽기와 upsert 분리 — 오늘 수집이 실패해도 기존 히스토리(월 누적·스파크라인)는 유지
+const usageHist = readUsageHistory();
+if (cmodels) upsertUsageHistory(usageHist, cmodels);
 const codex = getCodex();
 maybeAutoRefreshCodex(codex); // 소진+오래됨 시 백그라운드 갱신 (throttle)
 const out = [];
@@ -1249,6 +1254,9 @@ if (hasClaude) {
         `${label}▕${g}▏ $${m.cost.toFixed(1)}  ${fmtTok(m.tokens)} | font=Menlo`,
       );
     }
+  }
+  // 월 누적·스파크라인은 히스토리만으로 렌더 — 오늘 수집(cmodels) 실패와 무관
+  {
     const monthly = monthlyUsageRow(usageHist);
     if (monthly) {
       out.push(monthly.row);
