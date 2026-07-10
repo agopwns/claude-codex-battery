@@ -48,7 +48,7 @@ const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
 // ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.9.0";
+const VERSION = "1.10.0";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/agopwns/claude-codex-battery/main";
@@ -721,6 +721,63 @@ function checkBudgetAlert(curSum) {
     writeFileSync(BUDGET_STATE_FILE, JSON.stringify(state));
   } catch {}
 }
+// 월말 랜딩 예측 + 세이프 스펜드: 최근 14일 중 완료된 날(오늘 제외)의 중앙값을 일일 페이스로
+// 월말 총액을 투영한다. 완료일 5개 미만이면 null(데이터 수집 중 — 월초·신규 설치 오탐 방지).
+// BUDGET 있으면 "남은 하루 $Z" 허용액과 예산 초과 페이스 최초 진입 시 월 1회 알림.
+const LANDING_STATE_FILE = `${HOME}/.claude/swiftbar/.batt-landing-state.json`;
+function monthlyLandingRow(hist, curSum) {
+  try {
+    const done = [];
+    for (let i = 1; i <= 14; i++) {
+      const key = localYmd(new Date(Date.now() - i * 86400e3));
+      if (hist[key] && typeof hist[key].cost === "number")
+        done.push(hist[key].cost);
+    }
+    if (done.length < 5) return null;
+    const sorted = [...done].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    const pace =
+      sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    const d = new Date();
+    const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+    const remainDays = lastDay - d.getDate(); // 오늘을 뺀 남은 날 수 (오늘 실적은 curSum에 이미 반영)
+    const projected = curSum + pace * remainDays;
+    let s = `월말 예상 $${projected.toFixed(0)} (페이스 $${pace.toFixed(0)}/일)`;
+    let color = "#8b949e";
+    if (BUDGET > 0) {
+      const diff = projected - BUDGET;
+      s +=
+        diff > 0
+          ? `  ·  예산 +$${diff.toFixed(0)} 초과 페이스`
+          : `  ·  예산까지 −$${(-diff).toFixed(0)}`;
+      const allow = Math.max(0, BUDGET - curSum) / (remainDays + 1); // 오늘 포함 잔여 일수
+      s += `  ·  남은 하루 $${allow < 10 ? allow.toFixed(1) : allow.toFixed(0)}`;
+      color = diff > 0 ? "#FF453A" : "#8b949e";
+      // 초과 페이스 최초 진입 시 월 1회 알림 — 래칫(월 내 재알림 없음), 달 바뀌면 리셋
+      try {
+        const monthKey = localYmd().slice(0, 7);
+        let st = null;
+        try {
+          const p = JSON.parse(readFileSync(LANDING_STATE_FILE, "utf8"));
+          if (p && typeof p === "object" && p.month && p.zone) st = p;
+        } catch {}
+        if (!st || st.month !== monthKey) st = { month: monthKey, zone: "ok" };
+        if (diff > 0 && st.zone === "ok") {
+          if (NOTIFY !== "off")
+            fireNotification(
+              `📈 이 페이스면 월말 $${projected.toFixed(0)} — 예산 $${BUDGET.toFixed(0)}보다 $${diff.toFixed(0)} 초과 예상`,
+            );
+          st.zone = "over";
+        }
+        mkdirSync(dirname(LANDING_STATE_FILE), { recursive: true });
+        writeFileSync(LANDING_STATE_FILE, JSON.stringify(st));
+      } catch {}
+    }
+    return `${s} | size=11 color=${color}`;
+  } catch {
+    return null;
+  }
+}
 // 최근 7일(로컬 달력 기준, 오늘 포함) 일별 지출 막대 차트 행. 데이터 없으면(전부 null) null.
 // 막대 색: 오늘=진하게(다크/라이트 대비), 나머지 데이터일=회색, 결측일=흐린 회색 1px 스텁.
 // 차트 버그가 드롭다운 전체를 죽이면 안 되므로 통째로 try/catch.
@@ -1372,6 +1429,8 @@ if (hasClaude) {
     if (monthly) {
       out.push(monthly.row);
       if (BUDGET > 0) checkBudgetAlert(monthly.curSum);
+      const landing = monthlyLandingRow(usageHist, monthly.curSum);
+      if (landing) out.push(landing);
     }
     const sparkRow = sparklineRow(usageHist, dark);
     if (sparkRow) out.push(sparkRow);
