@@ -13,6 +13,8 @@ import {
   statSync,
   existsSync,
   mkdirSync,
+  renameSync,
+  unlinkSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
@@ -46,7 +48,7 @@ const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
 // ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.7.4";
+const VERSION = "1.8.0";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/agopwns/claude-codex-battery/main";
@@ -971,14 +973,88 @@ function maybeAutoRefreshCodex(codex) {
   } catch {}
 }
 
+// ── 수집/렌더 분리 ──────────────────────────────────────────
+// 렌더는 스냅샷 캐시를 읽어 즉시 그리고, 느린 수집(ccusage×2·usage API·codex 로그 스캔)은
+// `--collect` 모드의 분리 프로세스가 백그라운드에서 수행한다 — 메뉴바가 네트워크에 볼모로 잡히지 않게.
+const SNAPSHOT_FILE = `${HOME}/.claude/swiftbar/.usage-snapshot.json`;
+const COLLECT_LOCK = `${HOME}/.claude/swiftbar/.collect.lock`;
+const SNAP_V = 1;
+function runCollect() {
+  // lock TTL 90s — 중복 수집(새로고침 연타 등) 방지. 그보다 오래된 lock은 죽은 프로세스로 보고 무시(자가 복구)
+  try {
+    if (Date.now() - statSync(COLLECT_LOCK).mtimeMs < 90e3) return false;
+  } catch {}
+  try {
+    mkdirSync(dirname(COLLECT_LOCK), { recursive: true });
+    writeFileSync(COLLECT_LOCK, String(process.pid));
+  } catch {}
+  try {
+    const snap = {
+      v: SNAP_V,
+      collectedAt: Math.floor(Date.now() / 1000),
+      claude: getClaude(),
+      cusage: getClaudeUsage(),
+      cmodels: getClaudeModels(),
+      codex: getCodex(),
+    };
+    // 임시 파일 + rename 원자 교체 — 렌더가 반쯤 쓰인 스냅샷을 읽지 않게
+    const tmp = `${SNAPSHOT_FILE}.tmp`;
+    writeFileSync(tmp, JSON.stringify(snap));
+    renameSync(tmp, SNAPSHOT_FILE);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try {
+      unlinkSync(COLLECT_LOCK);
+    } catch {}
+  }
+}
+function readSnapshot() {
+  try {
+    const s = JSON.parse(readFileSync(SNAPSHOT_FILE, "utf8"));
+    if (s && s.v === SNAP_V && typeof s.collectedAt === "number") return s;
+  } catch {}
+  return null;
+}
+// 수집 전용 모드 — 렌더 없이 스냅샷만 갱신하고 종료
+if (process.argv.includes("--collect")) {
+  runCollect();
+  process.exit(0);
+}
+
 // ── 렌더링 ─────────────────────────────────────────────────
-const claude = getClaude();
-const cusage = getClaudeUsage();
-const cmodels = getClaudeModels();
+let snap = readSnapshot();
+if (!snap) {
+  runCollect(); // 첫 실행 워밍업: 스냅샷이 아예 없으면 이번 한 번만 동기 수집
+  snap = readSnapshot();
+}
+if (!snap)
+  snap = {
+    collectedAt: 0,
+    claude: null,
+    cusage: null,
+    cmodels: null,
+    codex: null,
+  };
+const snapAge = Math.max(0, now - snap.collectedAt);
+// 90초 이상 오래됐으면 백그라운드 재수집 kick — 다음 렌더(2분 뒤)가 새 스냅샷을 읽는다
+if (snapAge > 90) {
+  try {
+    const child = spawn(process.execPath, [process.argv[1], "--collect"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+  } catch {}
+}
+const claude = snap.claude;
+const cusage = snap.cusage;
+const cmodels = snap.cmodels;
+const codex = snap.codex;
 // 읽기와 upsert 분리 — 오늘 수집이 실패해도 기존 히스토리(월 누적·스파크라인)는 유지
 const usageHist = readUsageHistory();
 if (cmodels) upsertUsageHistory(usageHist, cmodels);
-const codex = getCodex();
 maybeAutoRefreshCodex(codex); // 소진+오래됨 시 백그라운드 갱신 (throttle)
 const out = [];
 
@@ -1101,12 +1177,18 @@ let c5DepleteT = null; // 말풍선용: 예상 소진 시각(epoch초)
         state = { resetsAt: w.resetsAt, samples: [], notifiedAt: 0 };
       }
       const remainNow = 100 - (w.pct ?? 0);
+      // 샘플 시각은 측정 시각 기준 — 스냅샷 캐시를 같은 값으로 다시 읽어도 중복 샘플이 쌓이지 않는다
+      const sampleT =
+        typeof cusage.measuredAt === "number" && cusage.measuredAt > 0
+          ? cusage.measuredAt
+          : now;
       const prevLast = state.samples[state.samples.length - 1] || null;
-      state.samples.push({ t: now, remain: remainNow });
+      if (!prevLast || sampleT > prevLast.t)
+        state.samples.push({ t: sampleT, remain: remainNow });
       state.samples = state.samples.filter((s) => now - s.t <= 90 * 60);
       // 직전 샘플보다 잔량이 5%p 넘게 급상승 = 블록 중간 이상치(계정 단위 회복 등) → 새 샘플만 유지
       if (prevLast && remainNow - prevLast.remain > 5) {
-        state.samples = [{ t: now, remain: remainNow }];
+        state.samples = [{ t: sampleT, remain: remainNow }];
       }
       const first = state.samples[0];
       const last = state.samples[state.samples.length - 1];
@@ -1338,6 +1420,17 @@ if (upd.hasUpdate) {
 } else {
   out.push(
     `⬆️ 지금 업데이트 — GitHub 최신으로 교체 (현재 v${VERSION}) | bash="${SELF_DIR}/.ccb-update.sh" terminal=false refresh=true`,
+  );
+}
+// 데이터 헬스: 스냅샷 나이 + 소스별 상태 요약. 클릭하면 즉시 재수집 후 새로고침
+{
+  const healthBits = [`수집 ${snapAge < 5 ? "방금" : fmtDur(snapAge) + " 전"}`];
+  if (claude?.error) healthBits.push("ccusage 오류");
+  if (cusage && !cusage.live) healthBits.push("Claude API 캐시 폴백");
+  if (codex) healthBits.push(`Codex ${fmtDur(now - codex.measuredAt)} 전`);
+  const healthCol = snapAge > 300 || claude?.error ? "#d29922" : "#8b949e";
+  out.push(
+    `📡 ${healthBits.join(" · ")} — 클릭: 지금 재수집 | bash="${process.argv[1]}" param1=--collect terminal=false refresh=true size=11 color=${healthCol}`,
   );
 }
 out.push("🔄 지금 새로고침 | refresh=true");

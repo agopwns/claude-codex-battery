@@ -31,8 +31,8 @@ pkill -f "claude-pet.streamable"; open -g "swiftbar://refreshallplugins"
 
 ## 설정/상태 파일 (`~/.claude/swiftbar/`)
 
-- 설정(사용자 선택, 절대 임의 초기화 금지): `.batt-size`(big/small) `.batt-scale`(50~200%) `.batt-fill`(traffic/white/green/neon) `.batt-text`(auto/black/white/red/blue) `.batt-font`(70~100) `.batt-show`(CSV c5,cw,cf,x5,xw) `.batt-display`(image/text) `.batt-notify`(on/off) `.batt-budget`(USD, 수동) `.pet-species` `.pet-scale`(50~250%) `.pet-bubble`(on/off)
-- 상태(플러그인이 관리): `.claude-usage.json`(usage API 캐시) `usage-history.json`(일별 스냅샷, ROI 데이터 — 삭제 금지) `.batt-burn.json`(C5 샘플) `.batt-notify-state.json` `.batt-budget-state.json` `.pet-bubble-msg.json` `.pet-bubble-shown.json` `.update-check.json`
+- 설정(사용자 선택, 절대 임의 초기화 금지): `.batt-size`(big/small) `.batt-scale`(50~~200%) `.batt-fill`(traffic/white/green/neon) `.batt-text`(auto/black/white/red/blue) `.batt-font`(70~~100) `.batt-show`(CSV c5,cw,cf,x5,xw) `.batt-display`(image/text) `.batt-notify`(on/off) `.batt-budget`(USD, 수동) `.pet-species` `.pet-scale`(50~250%) `.pet-bubble`(on/off)
+- 상태(플러그인이 관리): `.usage-snapshot.json`(수집 캐시 — 렌더는 이것만 읽고, `--collect` 분리 프로세스가 갱신) `.collect.lock`(수집 중복 방지, TTL 90s) `.claude-usage.json`(usage API 캐시) `usage-history.json`(일별 스냅샷, ROI 데이터 — 삭제 금지) `.batt-burn.json`(C5 샘플) `.batt-notify-state.json` `.batt-budget-state.json` `.pet-bubble-msg.json` `.pet-bubble-shown.json` `.update-check.json`
 
 ## 코드 컨벤션
 
