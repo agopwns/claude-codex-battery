@@ -16,6 +16,7 @@ const HOME = homedir();
 const SETTINGS_DIR = `${HOME}/.claude/swiftbar`;
 const BURN_FILE = `${SETTINGS_DIR}/.batt-burn.json`;
 const SPECIES_FILE = `${SETTINGS_DIR}/.pet-species`;
+const PETSCALE_FILE = `${SETTINGS_DIR}/.pet-scale`;
 // 말풍선 팝업(네이티브 NSPanel) 관련 경로 — 배터리 위젯(claude-codex-usage.2m.js)이 메시지를 남기고,
 // 이 펫 플러그인이 드롭다운 표시 + (조건부) 팝업 발사를 담당
 const BUBBLE_MSG_FILE = `${SETTINGS_DIR}/.pet-bubble-msg.json`;
@@ -74,7 +75,9 @@ function encodePNG(w, h, rgba, dpi) {
   chunks.push(mk("IDAT", idat), mk("IEND", Buffer.alloc(0)));
   return Buffer.concat(chunks);
 }
-// 16×12 논리 px, SCALE=3 물리 배율 → 48×36 물리 px, dpi=216로 16×12pt 표시
+// 16×12 논리 px, SCALE=3 물리 배율 → 48×36 물리 px, dpi=216로 16×12pt 표시 (기본 100%)
+// 펫 크기 설정(.pet-scale)이 100이 아니면 dpiEff = DPI*100/petScalePct 로 재계산해 표시 크기를 바꾼다.
+// 메뉴바 높이는 ~24pt라 150% 초과 값은 세로로 잘릴 수 있음 — 사용자 선택이므로 별도 clamp는 하지 않는다.
 const LOGICAL_W = 16;
 const LOGICAL_H = 12;
 const SCALE = 3;
@@ -120,19 +123,20 @@ function isDarkMode() {
 // 공통 골격: 몸통 8×5(x4-11,y5-9) · 머리 4×4(x10-13,y2-5, 눈 구멍 (12,3)) · 다리 2×1 스텁
 const SPRITES = {
   cat: {
+    // run: 프레임0=다리 대각선으로 쭉 뻗음(질주), 프레임1=다리 모으고 몸 전체 1px 위로(바운스)
     run: [
       [
+        "................",
         "..........o..o..",
         "..........#..#..",
         "...........##...",
         "..........##.#..",
-        ".o........####..",
+        ".o....########..",
         ".#...#########..",
         "..#.########....",
         "...#########....",
         "....########....",
-        ".....######.....",
-        "....##....##....",
+        "..##.######.##..",
         "................",
       ],
       [
@@ -140,12 +144,12 @@ const SPRITES = {
         "..........#..#..",
         "...........##...",
         "..........##.#..",
-        "..........####..",
-        ".o...#########..",
-        ".#..########....",
-        "..##########....",
+        ".o....########..",
+        ".#...#########..",
+        "..#.########....",
+        "...#########....",
         "....########....",
-        ".....######.....",
+        "................",
         "......##.##.....",
         "................",
       ],
@@ -260,6 +264,7 @@ const SPRITES = {
     ],
   },
   hamster: {
+    // run: 프레임0=다리 대각선으로 쭉 뻗음(질주), 프레임1=다리 모으고 몸 전체 1px 위로(바운스)
     run: [
       [
         "................",
@@ -272,22 +277,22 @@ const SPRITES = {
         "...#########....",
         "....########....",
         ".....######.....",
-        ".....######.....",
-        "....##....##....",
+        "..##.######.##..",
+        "................",
       ],
       [
-        "................",
         "..........#..#..",
         "...........##...",
         "..........##.#..",
         "..........#o##..",
         ".....#########..",
         "....########....",
-        "....########....",
         "...#########....",
+        "....########....",
         ".....######.....",
-        ".....######.....",
+        "................",
         "......##.##.....",
+        "................",
       ],
     ],
     idle: [
@@ -400,8 +405,10 @@ const SPRITES = {
     ],
   },
   rabbit: {
+    // run: 프레임0=다리 대각선으로 쭉 뻗음(질주), 프레임1=다리 모으고 몸 전체 1px 위로(바운스)
     run: [
       [
+        "................",
         "...........##...",
         "...........#o...",
         "...........##...",
@@ -411,8 +418,7 @@ const SPRITES = {
         "....########....",
         "...#########....",
         "....########....",
-        ".....######.....",
-        "....##....##....",
+        "..##.######.##..",
         "................",
       ],
       [
@@ -423,9 +429,9 @@ const SPRITES = {
         "..........####..",
         ".....#########..",
         "....########....",
-        "....########....",
         "...#########....",
-        ".....######.....",
+        "....########....",
+        "................",
         "......##.##.....",
         "................",
       ],
@@ -540,6 +546,7 @@ const SPRITES = {
     ],
   },
   turtle: {
+    // run: 다른 종보다 보폭 1px 짧게(갤럽 아닌 종종걸음) — 프레임0=다리 살짝 벌림, 프레임1=다리 모으고 몸 1px 위로(바운스)
     run: [
       [
         "................",
@@ -552,11 +559,10 @@ const SPRITES = {
         "....ooooooo###..",
         "....########....",
         ".....######.....",
-        "....##....##....",
+        "...##......##...",
         "................",
       ],
       [
-        "................",
         "................",
         "................",
         "................",
@@ -567,6 +573,7 @@ const SPRITES = {
         "....########....",
         ".....######.....",
         "......##.##.....",
+        "................",
         "................",
       ],
     ],
@@ -704,6 +711,16 @@ function readSpecies() {
   return "cat";
 }
 
+// 펫 크기(%) — 50~250 사이 정수만 허용, 그 외/파일 없음/파싱 실패는 기본 100%.
+// pHYs dpi 트릭으로 적용: dpi를 낮추면 NSImage가 더 크게 표시한다 (216 → 16×12pt 기준).
+function readPetScale() {
+  try {
+    const v = parseInt(readFileSync(PETSCALE_FILE, "utf8").trim(), 10);
+    if (Number.isInteger(v) && v >= 50 && v <= 250) return v;
+  } catch {}
+  return 100;
+}
+
 // ── 말풍선 팝업 설정: on(기본) / off — ~/.claude/swiftbar/.pet-bubble ──
 function readBubbleSetting() {
   try {
@@ -806,9 +823,9 @@ function pickFrame(species, state, tick) {
   return { grid: S.idle[0], key: "idle0" };
 }
 
-// ── 렌더: 문자 그리드 → PNG base64. (species,state,frame,dark) 조합별로 캐시 ──
+// ── 렌더: 문자 그리드 → PNG base64. (species,state,frame,dark,scale) 조합별로 캐시 ──
 const spriteCache = new Map();
-function renderSprite(grid, accent, dark) {
+function renderSprite(grid, accent, dark, dpiEff) {
   const ink = dark ? [235, 235, 235] : [45, 45, 45];
   const cv = makeCanvas(LOGICAL_W, LOGICAL_H);
   for (let y = 0; y < LOGICAL_H; y++) {
@@ -819,14 +836,16 @@ function renderSprite(grid, accent, dark) {
       else if (ch === "o") cv.set(x, y, accent);
     }
   }
-  return encodePNG(cv.w, cv.h, cv.buf, DPI).toString("base64");
+  return encodePNG(cv.w, cv.h, cv.buf, dpiEff).toString("base64");
 }
-function getFrameBase64(species, state, tick, dark) {
+function getFrameBase64(species, state, tick, dark, petScalePct) {
   const { grid, key } = pickFrame(species, state, tick);
-  const cacheKey = `${species}|${key}|${dark}`;
+  // 캐시 키에 scale pct 포함 — 안 하면 크기 변경 후에도 옛 프레임(옛 dpi)이 남는다.
+  const cacheKey = `${species}|${key}|${dark}|${petScalePct}`;
   const cached = spriteCache.get(cacheKey);
   if (cached) return cached;
-  const b64 = renderSprite(grid, ACCENT[species], dark);
+  const dpiEff = (DPI * 100) / petScalePct;
+  const b64 = renderSprite(grid, ACCENT[species], dark, dpiEff);
   spriteCache.set(cacheKey, b64);
   return b64;
 }
@@ -840,7 +859,7 @@ const STATUS_LABEL = {
   exhausted: "상태: 방전",
   party: "상태: 풀충전 축하!",
 };
-function buildDropdown(state, species, bubbleMsg, bubbleSetting) {
+function buildDropdown(state, species, bubbleMsg, bubbleSetting, petScalePct) {
   const rows = [];
   // 말풍선: 배터리 위젯이 남긴 메시지가 있으면 드롭다운 맨 위에 노출 (상태 줄보다 먼저)
   if (bubbleMsg) rows.push(`💬 ${bubbleMsg} | size=12`);
@@ -854,6 +873,15 @@ function buildDropdown(state, species, bubbleMsg, bubbleSetting) {
       `동물: ${SPECIES_LABELS[sp]}${active ? " ✓" : ""} | bash=/bin/sh param1=-c param2="mkdir -p '${SETTINGS_DIR}' && echo ${sp} > '${SPECIES_FILE}'" terminal=false refresh=false`,
     );
   }
+  // 펫 크기 스테퍼: ±25%p, 50~250% 범위로 클램프. 동물 행과 동일한 bash-write 패턴.
+  const scaleUp = Math.min(250, petScalePct + 25);
+  const scaleDown = Math.max(50, petScalePct - 25);
+  rows.push(
+    `펫 크기 +25% → ${scaleUp}% (현재 ${petScalePct}%) | bash=/bin/sh param1=-c param2="mkdir -p '${SETTINGS_DIR}' && echo ${scaleUp} > '${PETSCALE_FILE}'" terminal=false refresh=false`,
+  );
+  rows.push(
+    `펫 크기 −25% → ${scaleDown}% | bash=/bin/sh param1=-c param2="mkdir -p '${SETTINGS_DIR}' && echo ${scaleDown} > '${PETSCALE_FILE}'" terminal=false refresh=false`,
+  );
   rows.push("---");
   // 팝업 말풍선 켜기/끄기 — 켜짐이면 클릭 시 off 기록, 꺼짐이면 클릭 시 on 기록 (동물 행과 동일한 bash 패턴)
   rows.push(
@@ -879,7 +907,8 @@ async function loop() {
       const burn = readBurn();
       const state = computeState(burn);
       const dark = isDarkMode();
-      const img = getFrameBase64(species, state, tick, dark);
+      const petScalePct = readPetScale();
+      const img = getFrameBase64(species, state, tick, dark, petScalePct);
       const bubbleData = readBubbleMsg();
       const bubbleSetting = readBubbleSetting();
       const justPartied = state === "party" && prevState !== "party";
@@ -887,7 +916,13 @@ async function loop() {
       const lines = [
         `| image=${img}`,
         "---",
-        ...buildDropdown(state, species, bubbleData?.msg, bubbleSetting),
+        ...buildDropdown(
+          state,
+          species,
+          bubbleData?.msg,
+          bubbleSetting,
+          petScalePct,
+        ),
       ];
       console.log("~~~");
       console.log(lines.join("\n"));

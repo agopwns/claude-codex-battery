@@ -46,7 +46,7 @@ const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
 // ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.7.2";
+const VERSION = "1.7.3";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/agopwns/claude-codex-battery/main";
