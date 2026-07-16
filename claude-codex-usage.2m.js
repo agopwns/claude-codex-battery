@@ -48,7 +48,7 @@ const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
 // ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.15.0";
+const VERSION = "1.16.0";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/agopwns/claude-codex-battery/main";
@@ -983,6 +983,11 @@ function sparklineRow(hist, dark) {
 // 실패 시 폴백: 자체 캐시(마지막 성공 응답) → 레거시 usage-cache.json 파일.
 const CLAUDE_STATE_DIR = `${HOME}/.claude/swiftbar`;
 const CLAUDE_USAGE_CACHE = `${CLAUDE_STATE_DIR}/.claude-usage.json`;
+// usage API가 429를 주면 백오프 타임스탬프를 남겨, 창이 풀릴 때까지 라이브 조회를
+// 아예 건너뛴다. 2분마다 무조건 재요청하면 rate-limit 창을 스스로 계속 열어두게 됨.
+const CLAUDE_USAGE_BACKOFF = `${CLAUDE_STATE_DIR}/.claude-usage-backoff.json`;
+const USAGE_BACKOFF_BASE_S = 600; // 첫 429 = 10분
+const USAGE_BACKOFF_MAX_S = 7200; // 상한 2시간 (level당 2배)
 const LEGACY_USAGE_FILES = [
   `${HOME}/.claude/MEMORY/STATE/usage-cache.json`,
   `${HOME}/.claude/PAI/MEMORY/STATE/usage-cache.json`,
@@ -1009,13 +1014,45 @@ function readClaudeToken() {
   return null;
 }
 
+function readUsageBackoff() {
+  try {
+    const b = JSON.parse(readFileSync(CLAUDE_USAGE_BACKOFF, "utf8"));
+    return { until: b.until || 0, level: b.level || 0 };
+  } catch {
+    return { until: 0, level: 0 };
+  }
+}
+function armUsageBackoff(level) {
+  const delay = Math.min(
+    USAGE_BACKOFF_MAX_S,
+    USAGE_BACKOFF_BASE_S * 2 ** Math.max(0, level - 1),
+  );
+  try {
+    mkdirSync(CLAUDE_STATE_DIR, { recursive: true });
+    writeFileSync(
+      CLAUDE_USAGE_BACKOFF,
+      JSON.stringify({ until: Math.floor(Date.now() / 1000) + delay, level }),
+    );
+  } catch {}
+}
+function clearUsageBackoff() {
+  try {
+    if (existsSync(CLAUDE_USAGE_BACKOFF)) unlinkSync(CLAUDE_USAGE_BACKOFF);
+  } catch {}
+}
+
 function fetchClaudeUsageLive() {
+  // 429 백오프 창 안이면 라이브 조회 자체를 스킵 (self-perpetuating rate-limit 방지)
+  const bo = readUsageBackoff();
+  if (bo.until && Math.floor(Date.now() / 1000) < bo.until) return null;
+
   const token = readClaudeToken();
   if (!token) return null;
   try {
+    // -f 대신 http_code를 마지막 줄에 붙여 429를 본문/상태로 구분한다.
     // Authorization 헤더는 stdin(-H @-)으로 전달 — ps 프로세스 목록에 토큰 노출 방지
-    const raw = execSync(
-      `/usr/bin/curl -fsS --max-time 5 -H @- -H "anthropic-beta: oauth-2025-04-20" https://api.anthropic.com/api/oauth/usage`,
+    const out = execSync(
+      `/usr/bin/curl -sS --max-time 5 -w '\\n%{http_code}' -H @- -H "anthropic-beta: oauth-2025-04-20" https://api.anthropic.com/api/oauth/usage`,
       {
         encoding: "utf8",
         timeout: 8000,
@@ -1023,8 +1060,20 @@ function fetchClaudeUsageLive() {
         stdio: ["pipe", "pipe", "ignore"],
       },
     );
-    const d = JSON.parse(raw);
+    const nl = out.lastIndexOf("\n");
+    const status = parseInt(out.slice(nl + 1).trim(), 10);
+    const body = nl >= 0 ? out.slice(0, nl) : out;
+
+    if (status === 429) {
+      // rate-limit — 백오프를 걸어 창이 풀릴 때까지 조회를 멈춘다 (level당 2배)
+      armUsageBackoff(bo.level + 1);
+      return null;
+    }
+    if (status !== 200) return null; // 그 외 오류는 백오프 없이 다음 틱 재시도
+
+    const d = JSON.parse(body);
     if (!d?.five_hour) return null;
+    clearUsageBackoff();
     try {
       mkdirSync(CLAUDE_STATE_DIR, { recursive: true });
       writeFileSync(
@@ -1034,6 +1083,7 @@ function fetchClaudeUsageLive() {
     } catch {}
     return { data: d, measuredAt: Math.floor(Date.now() / 1000), live: true };
   } catch {
+    // 네트워크/타임아웃 등 전송 실패 — 백오프 없이 다음 틱 재시도
     return null;
   }
 }
