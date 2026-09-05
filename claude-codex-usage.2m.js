@@ -48,7 +48,7 @@ const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
 // ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.16.0";
+const VERSION = "1.16.1";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/agopwns/claude-codex-battery/main";
@@ -1160,12 +1160,28 @@ function walkJsonl(dir, out) {
     }
   }
 }
+// API의 primary/secondary 순서는 기간을 보장하지 않는다. 렌더·알림에는 기간별로 전달한다.
+function normalizeCodexLimits(rl, measuredAt) {
+  const windows = [rl.primary, rl.secondary].filter(Boolean);
+  return {
+    measuredAt,
+    limitId: rl.limit_id || "codex",
+    plan: rl.plan_type || null,
+    fiveHour: windows.find((w) => w.window_minutes === 300) || null,
+    weekly: windows.find((w) => w.window_minutes === 10080) || null,
+    hasWindows: windows.length > 0,
+    credits: rl.credits || null,
+  };
+}
 function getCodex() {
   if (!existsSync(CODEX_SESSIONS)) return null;
   const files = [];
   walkJsonl(CODEX_SESSIONS, files);
   files.sort((a, b) => b.mtime - a.mtime);
-  for (const f of files.slice(0, 8)) {
+  let latest = null;
+  for (const f of files) {
+    // 파일 수정 시각은 탐색 상한으로만 사용한다. 실제 측정 시각은 이벤트에서 읽는다.
+    if (latest && f.mtime < latest.measuredAt * 1000) continue;
     try {
       const lines = readFileSync(f.path, "utf8").trim().split("\n");
       for (let i = lines.length - 1; i >= 0; i--) {
@@ -1177,21 +1193,17 @@ function getCodex() {
           continue;
         }
         const rl = obj.payload?.rate_limits ?? obj.rate_limits;
-        // prolite=primary/secondary(%), premium=credits(잔액) — 둘 중 하나라도 있으면 유효
-        if (rl && (rl.primary || rl.secondary || rl.credits)) {
-          return {
-            measuredAt: Math.floor(f.mtime / 1000),
-            limitId: rl.limit_id || null,
-            plan: rl.plan_type || null,
-            primary: rl.primary || null,
-            secondary: rl.secondary || null,
-            credits: rl.credits || null,
-          };
-        }
+        // Spark 등 모델 전용 한도를 일반 Codex 배터리에 섞지 않는다. 구형 로그는 ID가 없다.
+        if (!rl || (rl.limit_id && rl.limit_id !== "codex")) continue;
+        if (!rl.primary && !rl.secondary && !rl.credits) continue;
+        const measuredAt = Date.parse(obj.timestamp) / 1000;
+        if (!Number.isFinite(measuredAt)) continue;
+        if (!latest || measuredAt > latest.measuredAt)
+          latest = normalizeCodexLimits(rl, measuredAt);
       }
     } catch {}
   }
-  return null;
+  return latest;
 }
 function windowState(w) {
   if (!w) return null;
@@ -1208,12 +1220,12 @@ function maybeAutoRefreshCodex(codex) {
     if (!codex) return;
     // 소진 판정: credits 소진 OR 어떤 창이든 100% 사용
     let exhausted = false;
-    if (codex.credits) {
+    if (!codex.hasWindows && codex.credits) {
       const cr = codex.credits;
       exhausted = !cr.unlimited && (!cr.has_credits || Number(cr.balance) <= 0);
     } else {
-      const p = windowState(codex.primary),
-        s = windowState(codex.secondary);
+      const p = windowState(codex.fiveHour),
+        s = windowState(codex.weekly);
       exhausted = Boolean((p && p.pct >= 100) || (s && s.pct >= 100));
     }
     if (!exhausted) return;
@@ -1243,7 +1255,7 @@ function maybeAutoRefreshCodex(codex) {
 // `--collect` 모드의 분리 프로세스가 백그라운드에서 수행한다 — 메뉴바가 네트워크에 볼모로 잡히지 않게.
 const SNAPSHOT_FILE = `${HOME}/.claude/swiftbar/.usage-snapshot.json`;
 const COLLECT_LOCK = `${HOME}/.claude/swiftbar/.collect.lock`;
-const SNAP_V = 1;
+const SNAP_V = 2;
 function runCollect() {
   // lock TTL 90s — 중복 수집(새로고침 연타 등) 방지. 그보다 오래된 lock은 죽은 프로세스로 보고 무시(자가 복구)
   try {
@@ -1341,13 +1353,13 @@ if (cusage) {
   battItems.push({ label: "C5", remain: Math.max(0, 100 - claude.elapsedPct) });
 }
 // Codex — 세션 데이터 있을 때만. Codex 안 쓰는 사람에겐 X 배터리 자체를 안 그림.
-if (codex && (codex.primary || codex.secondary)) {
+if (codex && (codex.fiveHour || codex.weekly)) {
   // prolite: 5시간·주간 % 창
-  const p = windowState(codex.primary);
-  const s = windowState(codex.secondary);
-  battItems.push({ label: "X5", remain: p ? Math.max(0, 100 - p.pct) : null });
-  battItems.push({ label: "XW", remain: s ? Math.max(0, 100 - s.pct) : null });
-} else if (codex && codex.credits) {
+  const p = windowState(codex.fiveHour);
+  const s = windowState(codex.weekly);
+  if (p) battItems.push({ label: "X5", remain: Math.max(0, 100 - p.pct) });
+  if (s) battItems.push({ label: "XW", remain: Math.max(0, 100 - s.pct) });
+} else if (codex && !codex.hasWindows && codex.credits) {
   // premium: 크레딧 잔액 (총량 미제공 → 있음=100 / 소진=0 / 무제한=100)
   const cr = codex.credits;
   const remain = cr.unlimited
@@ -1564,8 +1576,8 @@ function resetTimelineRow() {
     }
     // Codex 3h+ 스테일이면 리셋 시각을 신뢰할 수 없음 — 타임라인·알림 모두 제외 (기존 패턴)
     if (codex && now - codex.measuredAt <= 3 * 3600) {
-      const p = windowState(codex.primary);
-      const s = windowState(codex.secondary);
+      const p = windowState(codex.fiveHour);
+      const s = windowState(codex.weekly);
       if (p && !p.stale && p.resetsIn > 0)
         items.push({
           key: "x5",
@@ -1628,7 +1640,7 @@ if (battItems.length) {
 }
 out.push("---");
 const codexLegend =
-  codex?.credits && !codex.primary && !codex.secondary
+  codex?.credits && !codex.hasWindows
     ? "X = Codex 크레딧"
     : "X5·XW = Codex 5시간·주간";
 const legendParts = [];
@@ -1725,10 +1737,10 @@ if (hasCodex) {
   out.push(
     `Codex${codex?.plan ? " · " + codex.plan : codex?.limitId ? " · " + codex.limitId : ""} | size=13 color=#8b949e`,
   );
-  const p = windowState(codex.primary);
-  const s = windowState(codex.secondary);
+  const p = windowState(codex.fiveHour);
+  const s = windowState(codex.weekly);
   // premium: primary/secondary 없이 크레딧 잔액만
-  if (!p && !s && codex.credits) {
+  if (!codex.hasWindows && codex.credits) {
     const cr = codex.credits;
     if (cr.unlimited) {
       out.push("크레딧  무제한 | font=Menlo color=#3fb950");
@@ -1765,6 +1777,10 @@ if (hasCodex) {
     );
     out.push(`      ${reset} | font=Menlo size=11 color=#8b949e`);
   }
+  if (codex.hasWindows && !p)
+    out.push("5시간 한도 · 데이터 미제공 | size=11 color=#8b949e");
+  if (codex.hasWindows && !s)
+    out.push("주간 한도 · 데이터 미제공 | size=11 color=#8b949e");
   const age = now - codex.measuredAt;
   const staleWarn = age > 3 * 3600; // 3시간+ 오래됨 → 리셋됐을 수 있음
   out.push(
