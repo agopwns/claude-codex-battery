@@ -18,8 +18,10 @@ if ! head -1 "$TMP" | grep -q "bun" || ! grep -q "renderBatteryImage" "$TMP"; th
   exit 1
 fi
 
-# 이전본 백업 후 교체 (shebang을 이 환경의 bun 경로로)
-[ -f "$DEST" ] && cp "$DEST" "$DEST.bak"
+# 이전본 백업 후 교체 (shebang을 이 환경의 bun 경로로).
+# 백업을 플러그인 폴더에 두면 SwiftBar가 .bak도 플러그인으로 실행한다.
+mkdir -p "$HOME/.claude/swiftbar"
+[ -f "$DEST" ] && cp "$DEST" "$HOME/.claude/swiftbar/claude-codex-usage.prev.js"
 sed "1s|.*|#!$BUN|" "$TMP" > "$DEST"
 chmod +x "$DEST"
 rm -f "$TMP"
@@ -28,4 +30,4 @@ rm -f "$TMP"
 rm -f "$HOME/.claude/swiftbar/.update-check.json" 2>/dev/null || true
 open "swiftbar://refreshallplugins" 2>/dev/null || true
 
-echo "✅ 최신으로 업데이트했습니다. (이전본: $DEST.bak)"
+echo "✅ 최신으로 업데이트했습니다. (이전본: $HOME/.claude/swiftbar/claude-codex-usage.prev.js)"

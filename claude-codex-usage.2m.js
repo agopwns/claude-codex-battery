@@ -48,7 +48,7 @@ const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
 // ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.16.1";
+const VERSION = "1.17.0";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/agopwns/claude-codex-battery/main";
@@ -1256,6 +1256,102 @@ function maybeAutoRefreshCodex(codex) {
 const SNAPSHOT_FILE = `${HOME}/.claude/swiftbar/.usage-snapshot.json`;
 const COLLECT_LOCK = `${HOME}/.claude/swiftbar/.collect.lock`;
 const SNAP_V = 2;
+
+// PixelLab은 토큰이 아니라 구독 생성 횟수(generations)로 과금한다.
+// 토큰은 stdin 헤더로만 넘기고 스냅샷·로그에는 숫자만 남긴다.
+function findPixelLabBearer(node) {
+  if (!node || typeof node !== "object") return null;
+  if (!Array.isArray(node)) {
+    const srv = node.mcpServers?.pixellab;
+    if (srv && typeof srv === "object") {
+      const headers = srv.headers || {};
+      const auth = headers.Authorization || headers.authorization || "";
+      const m = /^Bearer\s+(\S+)/i.exec(String(auth));
+      if (m) return m[1];
+      const env = srv.env;
+      if (env && typeof env === "object") {
+        const k = env.PIXELLAB_API_KEY || env.PIXELLAB_SECRET;
+        if (k) return String(k).trim();
+      }
+    }
+  }
+  for (const child of Array.isArray(node) ? node : Object.values(node)) {
+    const found = findPixelLabBearer(child);
+    if (found) return found;
+  }
+  return null;
+}
+function readPixelLabToken() {
+  const env = process.env.PIXELLAB_API_KEY;
+  if (env && String(env).trim()) return String(env).trim();
+  const files = [
+    `${HOME}/.claude.json`,
+    `${HOME}/.cursor/mcp.json`,
+    `${HOME}/Library/Application Support/Claude/claude_desktop_config.json`,
+  ];
+  for (const f of files) {
+    try {
+      const token = findPixelLabBearer(JSON.parse(readFileSync(f, "utf8")));
+      if (token) return token;
+    } catch {}
+  }
+  return null;
+}
+function readPrevPixelLab() {
+  try {
+    const s = JSON.parse(readFileSync(SNAPSHOT_FILE, "utf8"));
+    if (s?.pixellab && s.pixellab.error == null && s.pixellab.total != null)
+      return s.pixellab;
+  } catch {}
+  return null;
+}
+function getPixelLab() {
+  const prev = readPrevPixelLab();
+  const token = readPixelLabToken();
+  if (!token) return prev ? { ...prev, live: false } : null;
+  try {
+    const out = execSync(
+      `/usr/bin/curl -sS --max-time 8 -w '\\n%{http_code}' -H @- https://api.pixellab.ai/v2/balance`,
+      {
+        encoding: "utf8",
+        timeout: 12000,
+        input: `Authorization: Bearer ${token}\n`,
+        stdio: ["pipe", "pipe", "ignore"],
+      },
+    );
+    const nl = out.lastIndexOf("\n");
+    const status = parseInt(out.slice(nl + 1).trim(), 10);
+    const body = nl >= 0 ? out.slice(0, nl) : out;
+    if (status !== 200)
+      return prev
+        ? { ...prev, live: false }
+        : { error: "http", measuredAt: Math.floor(Date.now() / 1000) };
+    const d = JSON.parse(body);
+    const sub = d.subscription || {};
+    const remaining = Number(sub.generations);
+    const total = Number(sub.total);
+    if (!Number.isFinite(remaining) || !Number.isFinite(total) || total < 0)
+      return prev
+        ? { ...prev, live: false }
+        : { error: "shape", measuredAt: Math.floor(Date.now() / 1000) };
+    const credits = Number(d.credits?.usd);
+    return {
+      measuredAt: Math.floor(Date.now() / 1000),
+      live: true,
+      used: Math.max(0, total - remaining),
+      remaining,
+      total,
+      plan: sub.plan || null,
+      status: sub.status || null,
+      creditsUsd: Number.isFinite(credits) ? credits : null,
+    };
+  } catch {
+    return prev
+      ? { ...prev, live: false }
+      : { error: "fetch", measuredAt: Math.floor(Date.now() / 1000) };
+  }
+}
+
 function runCollect() {
   // lock TTL 90s — 중복 수집(새로고침 연타 등) 방지. 그보다 오래된 lock은 죽은 프로세스로 보고 무시(자가 복구)
   try {
@@ -1273,6 +1369,7 @@ function runCollect() {
       cusage: getClaudeUsage(),
       cmodels: getClaudeModels(),
       codex: getCodex(),
+      pixellab: getPixelLab(),
     };
     // 임시 파일 + rename 원자 교체 — 렌더가 반쯤 쓰인 스냅샷을 읽지 않게
     const tmp = `${SNAPSHOT_FILE}.tmp`;
@@ -1313,6 +1410,7 @@ if (!snap)
     cusage: null,
     cmodels: null,
     codex: null,
+    pixellab: null,
   };
 const snapAge = Math.max(0, now - snap.collectedAt);
 // 90초 이상 오래됐으면 백그라운드 재수집 kick — 다음 렌더(2분 뒤)가 새 스냅샷을 읽는다
@@ -1329,6 +1427,7 @@ const claude = snap.claude;
 const cusage = snap.cusage;
 const cmodels = snap.cmodels;
 const codex = snap.codex;
+const pixellab = snap.pixellab || null;
 // 읽기와 upsert 분리 — 오늘 수집이 실패해도 기존 히스토리(월 누적·스파크라인)는 유지
 const usageHist = readUsageHistory();
 if (cmodels) upsertUsageHistory(usageHist, cmodels);
@@ -1668,7 +1767,8 @@ if (legendParts.length) {
   out.push("---");
 }
 
-// Claude 상세 — hasClaude일 때만 (Claude Code 안 쓰면 섹션 자체 생략)
+// Claude 사용량 게이지. 비용 내역은 Codex·PixelLab 한도 아래로 내린다.
+let showedUsage = false;
 if (hasClaude) {
   out.push("Claude Code | size=13 color=#8b949e");
   const runaway = runawayRow(usageHist, cmodels);
@@ -1696,44 +1796,12 @@ if (hasClaude) {
         : `측정 ${fmtDur(now - cusage.measuredAt)} 전 (캐시 폴백 — Claude Code 로그인·네트워크 확인) | size=11 color=#d29922`,
     );
   }
-  if (claude && !claude.error) {
-    out.push(
-      `블록 비용  $${claude.cost.toFixed(2)}  ·  ${fmtTok(claude.tokens)} 토큰  ·  $${claude.costPerHour?.toFixed(1) ?? "?"}/h | font=Menlo size=11 color=#8b949e`,
-    );
-  }
-  // 오늘 모델별 사용 (최대 모델 대비 막대)
-  if (cmodels && cmodels.models.length) {
-    out.push(
-      `오늘 모델별  ·  합 $${cmodels.total.toFixed(0)} | size=11 color=#8b949e`,
-    );
-    const maxCost = cmodels.models[0].cost || 1;
-    for (const m of cmodels.models) {
-      const g = bar((m.cost / maxCost) * 100, 12);
-      const label = shortModel(m.name).padEnd(9, " ");
-      out.push(
-        `${label}▕${g}▏ $${m.cost.toFixed(1)}  ${fmtTok(m.tokens)} | font=Menlo`,
-      );
-    }
-  }
-  // 월 누적·스파크라인은 히스토리만으로 렌더 — 오늘 수집(cmodels) 실패와 무관
-  {
-    const monthly = monthlyUsageRow(usageHist);
-    if (monthly) {
-      out.push(monthly.row);
-      if (BUDGET > 0) checkBudgetAlert(monthly.curSum);
-      const landing = monthlyLandingRow(usageHist, monthly.curSum);
-      if (landing) out.push(landing);
-    }
-    const sparkRow = sparklineRow(usageHist, dark);
-    if (sparkRow) out.push(sparkRow);
-    const mixRows = modelMixRows(usageHist);
-    if (mixRows) out.push(...mixRows);
-  }
-  out.push("---");
+  showedUsage = true;
 }
 
-// Codex 상세 — hasCodex일 때만 (Codex 안 쓰면 섹션 자체 생략)
+// Codex 사용량 — Claude Code 사용량 바로 아래
 if (hasCodex) {
+  if (showedUsage) out.push("---");
   out.push(
     `Codex${codex?.plan ? " · " + codex.plan : codex?.limitId ? " · " + codex.limitId : ""} | size=13 color=#8b949e`,
   );
@@ -1786,16 +1854,92 @@ if (hasCodex) {
   out.push(
     `측정 ${fmtDur(age)} 전${staleWarn ? "  ·  ⚠ 리셋됐을 수 있음, Codex 쓰면 갱신" : " (Codex 세션 기준)"} | size=11 color=${staleWarn ? "#d29922" : "#8b949e"}`,
   );
-  out.push("---");
+  showedUsage = true;
 }
 
-// 둘 다 없으면(신규/양쪽 미사용) 안내
-if (!hasClaude && !hasCodex) {
+// PixelLab — 과금 단위는 토큰이 아니라 이번 주기 생성 횟수
+if (pixellab) {
+  if (showedUsage) out.push("---");
+  const fmtGen = (n) => {
+    if (!Number.isFinite(n)) return "?";
+    const rounded = Math.round(n * 10) / 10;
+    return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+  };
+  out.push("PixelLab | size=13 color=#8b949e");
+  if (pixellab.error || pixellab.total == null) {
+    out.push("생성 잔량 조회 실패 | size=11 color=#d29922");
+  } else {
+    const remainPct =
+      pixellab.total > 0
+        ? Math.max(0, Math.min(100, (pixellab.remaining / pixellab.total) * 100))
+        : 0;
+    // 4/5000처럼 거의 가득 찬 잔량은 반올림하면 100%가 되어 사용분이 지워 보인다.
+    let shownPct = Math.round(remainPct);
+    if (pixellab.used > 0 && shownPct === 100) shownPct = 99;
+    out.push(
+      `생성 남음 ▕${bar(shownPct, 20)}▏ ${shownPct}%  (사용 ${fmtGen(pixellab.used)} · 가능 ${fmtGen(pixellab.remaining)}) | font=Menlo color=${heatRemainHex(shownPct)}`,
+    );
+    const bits = [];
+    if (pixellab.plan) bits.push(pixellab.plan);
+    if (pixellab.status && pixellab.status !== "active") bits.push(pixellab.status);
+    bits.push(`합계 ${fmtGen(pixellab.total)}`);
+    if (pixellab.creditsUsd != null)
+      bits.push(`크레딧 $${Number(pixellab.creditsUsd).toFixed(2)}`);
+    const stale = pixellab.live
+      ? ""
+      : `  ·  측정 ${fmtDur(Math.max(0, now - (pixellab.measuredAt || 0)))} 전`;
+    out.push(
+      `      ${bits.join(" · ")}${stale} | font=Menlo size=11 color=${pixellab.live ? "#8b949e" : "#d29922"}`,
+    );
+  }
+  showedUsage = true;
+}
+
+// 비용·모델별 — 한도 게이지들 아래
+const costRows = [];
+if (hasClaude) {
+  if (claude && !claude.error) {
+    costRows.push(
+      `블록 비용  $${claude.cost.toFixed(2)}  ·  ${fmtTok(claude.tokens)} 토큰  ·  $${claude.costPerHour?.toFixed(1) ?? "?"}/h | font=Menlo size=11 color=#8b949e`,
+    );
+  }
+  if (cmodels && cmodels.models.length) {
+    costRows.push(
+      `오늘 모델별  ·  합 $${cmodels.total.toFixed(0)} | size=11 color=#8b949e`,
+    );
+    const maxCost = cmodels.models[0].cost || 1;
+    for (const m of cmodels.models) {
+      const g = bar((m.cost / maxCost) * 100, 12);
+      const label = shortModel(m.name).padEnd(9, " ");
+      costRows.push(
+        `${label}▕${g}▏ $${m.cost.toFixed(1)}  ${fmtTok(m.tokens)} | font=Menlo`,
+      );
+    }
+  }
+  const monthly = monthlyUsageRow(usageHist);
+  if (monthly) {
+    costRows.push(monthly.row);
+    if (BUDGET > 0) checkBudgetAlert(monthly.curSum);
+    const landing = monthlyLandingRow(usageHist, monthly.curSum);
+    if (landing) costRows.push(landing);
+  }
+  const sparkRow = sparklineRow(usageHist, dark);
+  if (sparkRow) costRows.push(sparkRow);
+  const mixRows = modelMixRows(usageHist);
+  if (mixRows) costRows.push(...mixRows);
+}
+if (costRows.length) {
+  if (showedUsage) out.push("---");
+  out.push(...costRows);
+  showedUsage = true;
+}
+
+if (!showedUsage) {
   out.push(
     "Claude Code나 Codex를 실행하면 사용량이 표시됩니다 | size=12 color=gray",
   );
-  out.push("---");
 }
+out.push("---");
 
 // 새 버전이 있으면 강조 원클릭 업데이트, 없어도 수동 업데이트 행은 항상 노출
 const upd = getUpdateInfo();
@@ -1814,7 +1958,13 @@ if (upd.hasUpdate) {
   if (claude?.error) healthBits.push("ccusage 오류");
   if (cusage && !cusage.live) healthBits.push("Claude API 캐시 폴백");
   if (codex) healthBits.push(`Codex ${fmtDur(now - codex.measuredAt)} 전`);
-  const healthCol = snapAge > 300 || claude?.error ? "#d29922" : "#8b949e";
+  if (pixellab?.error) healthBits.push("PixelLab 조회 실패");
+  else if (pixellab)
+    healthBits.push(
+      `PixelLab ${pixellab.live && now - pixellab.measuredAt < 5 ? "방금" : fmtDur(now - pixellab.measuredAt) + " 전"}`,
+    );
+  const healthCol =
+    snapAge > 300 || claude?.error || pixellab?.error ? "#d29922" : "#8b949e";
   out.push(
     `📡 ${healthBits.join(" · ")} — 클릭: 지금 재수집 | bash="${process.argv[1]}" param1=--collect terminal=false refresh=true size=11 color=${healthCol}`,
   );
