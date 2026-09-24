@@ -98,3 +98,19 @@ test('v1 snapshot with wrongly selected Spark is discarded', () => {
   const { text } = render({ primary: window(300, 0), secondary: window(10080, 0), plan: 'pro', measuredAt: now }, 1);
   assert.doesNotMatch(text, /Codex · pro|5시간 남음|주간 남음/);
 });
+test('weekly pace projects depletion before reset at current burn rate', () => {
+  // 주기 4d 14h 경과에 97% 사용 → 약 21%/일, 남은 3%는 ~3h 버팀, 리셋은 2d 10h 후
+  const rl = rate('codex', 97); rl.primary.resets_at = now + (2 * 24 + 10) * 3600;
+  const { text } = render(collect([['one.jsonl', [event(rl)]]]));
+  assert.match(text, /페이스 −21\.\d%\/일 · 안전 −1\.2%\/일 ⚠️ 약 3h \d+m 후 소진 → 리셋까지 2d \d+h 공백/);
+});
+test('weekly pace shows headroom when burn is below safe rate', () => {
+  // 주기 3d 경과에 20% 사용 → 약 6.7%/일, 리셋(4d 후) 때 ~53% 남음
+  const rl = rate('codex', 20); rl.primary.resets_at = now + 4 * 86400;
+  const { text } = render(collect([['one.jsonl', [event(rl)]]]));
+  assert.match(text, /페이스 −6\.7%\/일 · 안전 −20\.0%\/일 — 여유, 1[12]d \d+h 버팀 · 리셋 때 ~53% 남음/);
+});
+test('weekly pace is hidden early in the window', () => {
+  const { text } = render(collect([['one.jsonl', [event(rate('codex', 5))]]]));
+  assert.doesNotMatch(text, /%\/일/);
+});

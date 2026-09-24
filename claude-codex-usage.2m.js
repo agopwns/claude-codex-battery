@@ -48,7 +48,7 @@ const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
 // ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.17.0";
+const VERSION = "1.18.0";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/agopwns/claude-codex-battery/main";
@@ -1623,6 +1623,40 @@ let c5DepleteT = null; // 말풍선용: 예상 소진 시각(epoch초)
   } catch {}
 }
 
+// ── 주간(CW·CF·XW) 소진 예측: 이번 주기 시작부터의 평균 소모 속도로 남은 잔량이 얼마나 버티는지 투영 ──
+// 주간 창은 7일 고정 → 시작 = 리셋 − 7일. 샘플 파일 없이 사용%÷경과시간(야간·휴식 포함 평균)으로 계산.
+// 경과 6h 미만·사용 1% 미만은 외삽 노이즈가 커서 생략. 구간 판정은 C5 페이스 코치와 같은 0.85~1.15 완충.
+const WEEK_SEC = 7 * 86400;
+function weeklyPaceRow(usedPct, resetsAt, measuredAt) {
+  try {
+    if (usedPct == null || typeof resetsAt !== "number" || resetsAt <= now)
+      return null;
+    const t = measuredAt > 0 ? Math.min(measuredAt, now) : now;
+    const elapsed = t - (resetsAt - WEEK_SEC);
+    if (elapsed < 6 * 3600 || elapsed > WEEK_SEC) return null;
+    if (usedPct < 1 || usedPct >= 100) return null;
+    const rate = usedPct / elapsed; // %/sec
+    const remain = 100 - usedPct;
+    const depleteIn = Math.max(0, t + remain / rate - now); // 지금부터 소진까지
+    const resetIn = resetsAt - now;
+    const perDay = rate * 86400;
+    const safe = (remain / Math.max(3600, resetsAt - t)) * 86400; // 리셋에 딱 맞춰 쓰는 속도
+    const ratio = perDay / safe;
+    const paceStr = `페이스 −${perDay.toFixed(1)}%/일 · 안전 −${safe.toFixed(1)}%/일`;
+    const color =
+      ratio >= 1.15 ? "#FF453A" : ratio >= 0.85 ? "#d29922" : "#8b949e";
+    // 리셋 전에 바닥나면 소진 시점 + 리셋까지 공백, 아니면 버티는 시간 + 리셋 때 잔량
+    if (depleteIn < resetIn) {
+      return `      ${paceStr} ⚠️ 약 ${fmtDur(depleteIn)} 후 소진 → 리셋까지 ${fmtDur(resetIn - depleteIn)} 공백 | font=Menlo size=11 color=${color}`;
+    }
+    const leftAtReset = Math.round(remain - rate * (resetsAt - t));
+    const lasts = depleteIn <= 14 * 86400 ? `${fmtDur(depleteIn)} 버팀 · ` : "";
+    return `      ${paceStr} — ${ratio >= 0.85 ? "빠듯" : "여유"}, ${lasts}리셋 때 ~${leftAtReset}% 남음 | font=Menlo size=11 color=${color}`;
+  } catch {
+    return null;
+  }
+}
+
 // ── 펫 말풍선: 데이터 기반 코멘트 한 줄 (우선순위 1~7, 첫 매치 채택) ──
 // 이번 실행에서 이미 계산된 값만 재사용(신규 파일 읽기·프로세스 실행 없음).
 // { msg, pri } 반환 — pri는 팝업 트리거(claude-pet.streamable.js)가 고우선순위(<=3)만 골라내는 데 사용.
@@ -1788,8 +1822,16 @@ if (hasClaude) {
     };
     winRow("5시간 남음", cusage.fiveHour);
     if (c5ProjectionRow) out.push(c5ProjectionRow);
+    const weeklyPace = (w) => {
+      const row = w && weeklyPaceRow(w.pct, w.resetsAt, cusage.measuredAt);
+      if (row) out.push(row);
+    };
     winRow("주간 남음 ", cusage.weekly);
-    if (cusage.fable) winRow(`${cusage.fable.model} 남음`, cusage.fable);
+    weeklyPace(cusage.weekly);
+    if (cusage.fable) {
+      winRow(`${cusage.fable.model} 남음`, cusage.fable);
+      weeklyPace(cusage.fable);
+    }
     out.push(
       cusage.live
         ? `라이브 (Anthropic usage API — 전 디바이스 합산) | size=11 color=#8b949e`
@@ -1844,6 +1886,14 @@ if (hasCodex) {
       `주간 남음  ▕${bar(sr, 20)}▏ ${Math.round(sr)}%  (사용 ${Math.round(s.pct)}%) | font=Menlo color=${heatRemainHex(sr)}`,
     );
     out.push(`      ${reset} | font=Menlo size=11 color=#8b949e`);
+    if (!s.stale) {
+      const paceRow = weeklyPaceRow(
+        s.pct,
+        codex.weekly.resets_at,
+        codex.measuredAt,
+      );
+      if (paceRow) out.push(paceRow);
+    }
   }
   if (codex.hasWindows && !p)
     out.push("5시간 한도 · 데이터 미제공 | size=11 color=#8b949e");
@@ -1871,7 +1921,10 @@ if (pixellab) {
   } else {
     const remainPct =
       pixellab.total > 0
-        ? Math.max(0, Math.min(100, (pixellab.remaining / pixellab.total) * 100))
+        ? Math.max(
+            0,
+            Math.min(100, (pixellab.remaining / pixellab.total) * 100),
+          )
         : 0;
     // 4/5000처럼 거의 가득 찬 잔량은 반올림하면 100%가 되어 사용분이 지워 보인다.
     let shownPct = Math.round(remainPct);
@@ -1881,7 +1934,8 @@ if (pixellab) {
     );
     const bits = [];
     if (pixellab.plan) bits.push(pixellab.plan);
-    if (pixellab.status && pixellab.status !== "active") bits.push(pixellab.status);
+    if (pixellab.status && pixellab.status !== "active")
+      bits.push(pixellab.status);
     bits.push(`합계 ${fmtGen(pixellab.total)}`);
     if (pixellab.creditsUsd != null)
       bits.push(`크레딧 $${Number(pixellab.creditsUsd).toFixed(2)}`);
