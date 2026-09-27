@@ -48,7 +48,7 @@ const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
 // ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.19.0";
+const VERSION = "1.19.1";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/agopwns/claude-codex-battery/main";
@@ -1305,6 +1305,8 @@ function readPrevPixelLab() {
   } catch {}
   return null;
 }
+// PixelLab 구독 갱신일(매월) — /v2/balance에 리셋 시각이 없어 수동 지정
+const PIXELLAB_RESET_DAY = 23;
 function getPixelLab() {
   const prev = readPrevPixelLab();
   const token = readPixelLabToken();
@@ -1345,6 +1347,13 @@ function getPixelLab() {
       const n = Number(rawReset);
       const ms = Number.isFinite(n) ? (n < 1e12 ? n * 1000 : n) : Date.parse(rawReset);
       if (Number.isFinite(ms)) resetsAt = Math.floor(ms / 1000);
+    }
+    // API가 리셋 시각을 안 주면(실측: 필드 없음) 매월 갱신일로 계산 — 다음 N일 00:00
+    if (resetsAt == null) {
+      const n = new Date();
+      let r = new Date(n.getFullYear(), n.getMonth(), PIXELLAB_RESET_DAY);
+      if (r <= n) r = new Date(n.getFullYear(), n.getMonth() + 1, PIXELLAB_RESET_DAY);
+      resetsAt = Math.floor(r.getTime() / 1000);
     }
     const nowSec = Math.floor(Date.now() / 1000);
     const used = Math.max(0, total - remaining);
