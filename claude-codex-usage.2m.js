@@ -48,7 +48,7 @@ const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
 // ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.18.0";
+const VERSION = "1.19.0";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/agopwns/claude-codex-battery/main";
@@ -1335,15 +1335,34 @@ function getPixelLab() {
         ? { ...prev, live: false }
         : { error: "shape", measuredAt: Math.floor(Date.now() / 1000) };
     const credits = Number(d.credits?.usd);
+    // 주기 리셋 시각 — 공개 스키마 미문서화라 흔한 필드명을 순서대로 탐색 (ISO 문자열 / epoch 초·ms)
+    const rawReset = [
+      "current_period_end", "period_end", "renews_at", "renewal_date",
+      "next_renewal", "reset_at", "resets_at", "next_reset", "expires_at", "billing_period_end",
+    ].map((k) => sub[k] ?? d[k]).find((v) => v != null && v !== "");
+    let resetsAt = null;
+    if (rawReset != null) {
+      const n = Number(rawReset);
+      const ms = Number.isFinite(n) ? (n < 1e12 ? n * 1000 : n) : Date.parse(rawReset);
+      if (Number.isFinite(ms)) resetsAt = Math.floor(ms / 1000);
+    }
+    const nowSec = Math.floor(Date.now() / 1000);
+    const used = Math.max(0, total - remaining);
+    // 주기 기준점: 합계가 같고 사용량이 줄지 않았으면 이월, 아니면(리셋·플랜 변경) 지금부터 새로 관측
+    const sameCycle =
+      prev && prev.total === total && prev.baseAt && used >= (prev.used ?? 0);
     return {
-      measuredAt: Math.floor(Date.now() / 1000),
+      measuredAt: nowSec,
       live: true,
-      used: Math.max(0, total - remaining),
+      baseAt: sameCycle ? prev.baseAt : nowSec,
+      baseUsed: sameCycle ? prev.baseUsed : used,
+      used,
       remaining,
       total,
       plan: sub.plan || null,
       status: sub.status || null,
       creditsUsd: Number.isFinite(credits) ? credits : null,
+      resetsAt,
     };
   } catch {
     return prev
@@ -1627,13 +1646,13 @@ let c5DepleteT = null; // 말풍선용: 예상 소진 시각(epoch초)
 // 주간 창은 7일 고정 → 시작 = 리셋 − 7일. 샘플 파일 없이 사용%÷경과시간(야간·휴식 포함 평균)으로 계산.
 // 경과 6h 미만·사용 1% 미만은 외삽 노이즈가 커서 생략. 구간 판정은 C5 페이스 코치와 같은 0.85~1.15 완충.
 const WEEK_SEC = 7 * 86400;
-function weeklyPaceRow(usedPct, resetsAt, measuredAt) {
+function weeklyPaceRow(usedPct, resetsAt, measuredAt, periodSec = WEEK_SEC) {
   try {
     if (usedPct == null || typeof resetsAt !== "number" || resetsAt <= now)
       return null;
     const t = measuredAt > 0 ? Math.min(measuredAt, now) : now;
-    const elapsed = t - (resetsAt - WEEK_SEC);
-    if (elapsed < 6 * 3600 || elapsed > WEEK_SEC) return null;
+    const elapsed = t - (resetsAt - periodSec);
+    if (elapsed < 6 * 3600 || elapsed > periodSec) return null;
     if (usedPct < 1 || usedPct >= 100) return null;
     const rate = usedPct / elapsed; // %/sec
     const remain = 100 - usedPct;
@@ -1937,6 +1956,11 @@ if (pixellab) {
     if (pixellab.status && pixellab.status !== "active")
       bits.push(pixellab.status);
     bits.push(`합계 ${fmtGen(pixellab.total)}`);
+    if (pixellab.resetsAt) {
+      const d = new Date(pixellab.resetsAt * 1000);
+      const left = Math.max(0, Math.ceil((pixellab.resetsAt - now) / 86400));
+      bits.push(`리셋 ${d.getMonth() + 1}/${d.getDate()} (${left}일 남음)`);
+    }
     if (pixellab.creditsUsd != null)
       bits.push(`크레딧 $${Number(pixellab.creditsUsd).toFixed(2)}`);
     const stale = pixellab.live
@@ -1945,6 +1969,32 @@ if (pixellab) {
     out.push(
       `      ${bits.join(" · ")}${stale} | font=Menlo size=11 color=${pixellab.live ? "#8b949e" : "#d29922"}`,
     );
+    // 사용량 페이스: 리셋 시각을 알면 주간과 같은 투영(주기 = 직전 달 같은 날 → 리셋), 모르면 관측 속도로 소진 시점만
+    try {
+      const usedPct =
+        pixellab.total > 0 ? (pixellab.used / pixellab.total) * 100 : null;
+      let paceRow = null;
+      if (pixellab.resetsAt && usedPct != null) {
+        const r = new Date(pixellab.resetsAt * 1000);
+        const start = new Date(r);
+        start.setMonth(start.getMonth() - 1);
+        paceRow = weeklyPaceRow(
+          usedPct,
+          pixellab.resetsAt,
+          pixellab.measuredAt,
+          pixellab.resetsAt - Math.floor(start.getTime() / 1000),
+        );
+      } else if (pixellab.baseAt) {
+        const dt = (pixellab.measuredAt || now) - pixellab.baseAt;
+        const du = pixellab.used - (pixellab.baseUsed ?? pixellab.used);
+        if (dt >= 6 * 3600 && du > 0) {
+          const perDay = (du / dt) * 86400;
+          const lasts = (pixellab.remaining / perDay) * 86400;
+          paceRow = `      페이스 ${fmtGen(perDay)}회/일 (${fmtDur(dt)} 관측) — 이대로면 ${lasts <= 60 * 86400 ? `약 ${fmtDur(lasts)} 후 소진` : "넉넉"} | font=Menlo size=11 color=#8b949e`;
+        }
+      }
+      if (paceRow) out.push(paceRow);
+    } catch {}
   }
   showedUsage = true;
 }
