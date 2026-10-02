@@ -17,7 +17,7 @@
 
 `C` = Claude · `X` = Codex. Each battery shows the **remaining %** of a limit window — full & green means plenty left, red means almost out. Click for a detailed breakdown with reset times.
 
-Built as a single [SwiftBar](https://github.com/swiftbar/SwiftBar) plugin — one self-contained script, **no third-party libraries**. The battery icons are rendered as PNGs from scratch in pure JavaScript (`node:zlib` only), so there's no image library and no `npm install`. Network calls: **one to Anthropic's official usage endpoint** (the same data `/usage` shows, fetched with your own local Claude Code login — [see Privacy](#privacy--security)) and an **optional once-a-day update check** ([see Updating](#updating)). (`ccusage` is an optional extra for the cost breakdown.)
+Built as a single [SwiftBar](https://github.com/swiftbar/SwiftBar) plugin — one self-contained script, **no third-party libraries**. The battery icons are rendered as PNGs from scratch in pure JavaScript (`node:zlib` only), so there's no image library and no `npm install`. It queries the official Anthropic usage endpoint and, when Grok CLI is logged in, xAI's CLI billing endpoint; there is also an **optional once-a-day update check** ([see Updating](#updating)). (`ccusage` is an optional extra for the cost breakdown.)
 
 ---
 
@@ -27,6 +27,7 @@ Built as a single [SwiftBar](https://github.com/swiftbar/SwiftBar) plugin — on
 |-------|-----------|--------|
 | **`C` Claude** | 5-hour session · weekly · **Fable** (top-model weekly cap) | Anthropic's OAuth usage API — queried live with your local Claude Code login; **account-level**, so usage from every device/surface is included |
 | **`X` Codex** | 5-hour · weekly (or credit balance on the premium plan) | `~/.codex/sessions/**/*.jsonl` → `rate_limits` |
+| **Grok** | Weekly/monthly credit remaining and used % gauge, server reset time, product breakdown | xAI CLI billing API using the local Grok CLI login; dropdown gauge only, no separate menu-bar battery |
 
 Click the widget for a dropdown with, per limit:
 
@@ -55,6 +56,7 @@ Colors follow a traffic-light scale: green ≥ 50 % left, amber < 50 %, red < 20
 | **[bun](https://bun.sh)** | ✅ | `curl -fsSL https://bun.sh/install \| bash` |
 | **Claude Code** | ✅ for `C` batteries | just needs to be **logged in** on this Mac (the widget reuses its login to query the usage API) |
 | **Codex CLI** | optional | for the `X` batteries; without it, only Claude is shown |
+| **Grok CLI** | optional | for the Grok dropdown section; without a login it shows “login required” |
 | **[ccusage](https://github.com/ryoppippi/ccusage)** | optional | adds the cost / token / per-model breakdown in the dropdown — **the battery works fully without it** |
 
 > **Note:** This widget shows *your own account's* limits — via your local Claude Code login and your local Codex session logs. If you don't use Claude Code (or Codex), there simply won't be any data to display.
@@ -108,8 +110,9 @@ To turn the check off entirely, comment out the `getUpdateInfo()` call near the 
 ## Privacy & security
 
 - **Claude limits come straight from Anthropic.** The widget reads your Claude Code OAuth token from the macOS Keychain (item `Claude Code-credentials`) and calls `api.anthropic.com/api/oauth/usage` — the same endpoint `/usage` uses. The token is sent **only to api.anthropic.com**, passed via stdin (never visible in `ps`), and never written to disk or logs. macOS may show a one-time Keychain permission prompt — click **Always Allow**. (Clicking *Deny* makes macOS re-prompt on every refresh — if you'd rather the widget never touch the Keychain, run `touch ~/.claude/swiftbar/.no-live` instead; it then reads local cache files only, like v1.1.)
-- **No other secrets read.** Codex `auth.json` and API keys are never touched.
-- **No usage data leaves your machine.** Nothing is uploaded anywhere; the only outbound calls are the Anthropic usage query above and the optional daily update check ([Updating](#updating)).
+- **Grok uses the Grok CLI login.** The widget reads the bearer token from `~/.grok/auth.json` (or `$GROK_HOME/auth.json`) on each collection and sends it only to `cli-chat-proxy.grok.com`. Headers are passed through stdin, so the token is absent from process arguments. The widget does not refresh or rewrite the login file, and its snapshot stores only normalized usage, period, plan, and product fields.
+- **Codex credentials are not read.** Codex usage still comes only from local session logs. The existing PixelLab section reads its API key from local MCP settings and queries `api.pixellab.ai/v2/balance`.
+- **No usage data is uploaded elsewhere.** Outbound calls are the Anthropic usage query, the optional Grok settings/billing and PixelLab balance queries, and the optional daily update check ([Updating](#updating)).
 - **No conversation content.** From Codex session logs it parses only the `rate_limits` object (numbers), never the messages.
 - **Auditable in one sitting.** The whole widget is a single dependency-free script — grep for `curl`/`fetch` and you've seen every network call it can make.
 
@@ -121,7 +124,9 @@ To turn the check off entirely, comment out the `getUpdateInfo()` call near the 
 
 **Codex — as fresh as your last Codex run.** Codex writes rate-limit data to its session logs *only while you use it*, and records no reset time. So the value is a snapshot from your most recent session — the dropdown labels it "measured N ago" and warns past 3h. Run Codex and it re-syncs instantly.
 
-**TL;DR** — Claude is live (same source as `/usage`); Codex is a clearly-labeled snapshot from your last session, not a live feed.
+**Grok — live when the CLI login is valid.** The dropdown uses xAI's credits billing response and displays only periods and reset times returned by the server. A failed or expired login does not trigger token refresh; the last valid reading remains visible with a cache age, or the section asks you to log in when no prior reading exists.
+
+**TL;DR** — Claude and Grok are queried live and fall back to clearly labeled cached readings; Codex is a snapshot from your last session.
 
 ---
 
@@ -132,6 +137,7 @@ The whole thing is one `.js` file run by bun on a timer.
 - **Battery icons** are drawn pixel-by-pixel into an RGBA buffer and encoded to PNG using only `node:zlib` (hand-rolled CRC32 + IHDR/IDAT/IEND chunks). A 5×7 bitmap font renders the numbers and the `C`/`X` group labels. SwiftBar displays the PNG at pixels ÷ 2 pt.
 - **Claude limits** are fetched from Anthropic's OAuth usage endpoint using the Claude Code login token in your Keychain, with the last good response cached at `~/.claude/swiftbar/.claude-usage.json` as an offline fallback. The Fable cap is the `weekly_scoped` entry.
 - **Codex limits** come from the newest session's `rate_limits`. The premium plan reports a `credits` object instead of percentages when exhausted; the widget handles both shapes.
+- **Grok usage** comes from `cli-chat-proxy.grok.com/v1/billing?format=credits`, with the optional plan label from `/v1/settings`. Missing percentages are shown as unavailable rather than assumed unused.
 
 ### Codex has one quirk
 

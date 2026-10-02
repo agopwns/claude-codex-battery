@@ -25,13 +25,13 @@ function collect(files) {
     return JSON.parse(JSON.stringify(ctx.result));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
-function render(codex, snapshotVersion = 2) {
+function render(codex, snapshotVersion = 2, extra = {}) {
   const output = [], spawned = [];
   const ctx = {
     ...fs, ...path, zlib, Buffer, homedir: () => '/test-home',
     existsSync: () => false,
     readFileSync: (p) => {
-      if (p.endsWith('.usage-snapshot.json')) return JSON.stringify({ v: snapshotVersion, collectedAt: now, codex });
+      if (p.endsWith('.usage-snapshot.json')) return JSON.stringify({ v: snapshotVersion, collectedAt: now, codex, ...extra });
       throw new Error('No fixture: ' + p);
     },
     statSync: () => { throw new Error('No file'); },
@@ -113,4 +113,43 @@ test('weekly pace shows headroom when burn is below safe rate', () => {
 test('weekly pace is hidden early in the window', () => {
   const { text } = render(collect([['one.jsonl', [event(rate('codex', 5))]]]));
   assert.doesNotMatch(text, /%\/일/);
+});
+
+test('Grok renders a dropdown gauge before PixelLab without a menu-bar battery', () => {
+  const grok = {
+    measuredAt: now,
+    live: true,
+    plan: 'SuperGrok',
+    usedPct: 11,
+    remainingPct: 89,
+    periodType: 'weekly',
+    resetsAt: now + 5 * 86400,
+    products: [{ product: 'GrokBuild', usedPct: 11 }],
+  };
+  const pixellab = {
+    measuredAt: now,
+    live: true,
+    used: 1,
+    remaining: 9,
+    total: 10,
+  };
+  const { text, items } = render(null, 2, { grok, pixellab });
+  assert.ok(text.indexOf('Grok · SuperGrok') < text.indexOf('PixelLab'));
+  assert.match(text, /주간 남음 ▕[^\n]+▏ 89%  \(사용 11%\)/);
+  assert.match(text, /제품별 · GrokBuild 사용 11%/);
+  assert.ok(!items.some((item) => item.label.startsWith('G')));
+});
+
+test('stale Grok usage is explicitly labeled as cache data with its age', () => {
+  const grok = {
+    measuredAt: now - 600,
+    live: false,
+    usedPct: 20,
+    remainingPct: 80,
+    periodType: 'weekly',
+    products: [],
+  };
+  const { text } = render(null, 2, { grok });
+  assert.match(text, /주간 남음 ▕[^\n]+▏ 80%  \(사용 20%\)/);
+  assert.match(text, /캐시 · 측정 10m 전/);
 });

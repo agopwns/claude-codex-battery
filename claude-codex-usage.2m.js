@@ -48,7 +48,7 @@ const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
 // ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.19.1";
+const VERSION = "1.20.1";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/agopwns/claude-codex-battery/main";
@@ -1257,6 +1257,223 @@ const SNAPSHOT_FILE = `${HOME}/.claude/swiftbar/.usage-snapshot.json`;
 const COLLECT_LOCK = `${HOME}/.claude/swiftbar/.collect.lock`;
 const SNAP_V = 2;
 
+// Grok CLI의 OIDC 토큰으로 계정 크레딧 사용량을 조회한다. 토큰은 매 수집마다
+// auth.json에서 다시 읽고 stdin 헤더로만 전달하며, 갱신하거나 스냅샷에 저장하지 않는다.
+const GROK_DIR = process.env?.GROK_HOME || `${HOME}/.grok`;
+const GROK_AUTH_FILE = `${GROK_DIR}/auth.json`;
+const GROK_API = "https://cli-chat-proxy.grok.com";
+
+function findGrokAuthEntry(auth) {
+  if (!auth || typeof auth !== "object" || Array.isArray(auth)) return null;
+  const entries = Object.entries(auth)
+    .filter(
+      ([scope, entry]) =>
+        (scope.startsWith("https://auth.x.ai::") ||
+          scope === "https://accounts.x.ai/sign-in") &&
+        entry &&
+        typeof entry === "object" &&
+        typeof entry.key === "string" &&
+        entry.key.trim(),
+    )
+    .map(([scope, entry]) => ({ scope, entry }));
+  const usable = entries.filter(({ entry }) => {
+    if (!entry.expires_at) return true;
+    const expires = Date.parse(entry.expires_at);
+    return Number.isFinite(expires) && expires > Date.now();
+  });
+  return (
+    usable.find(
+      ({ scope, entry }) =>
+        scope.startsWith("https://auth.x.ai::") &&
+        String(entry.auth_mode || "").toLowerCase() === "oidc",
+    )?.entry ??
+    usable.find(({ scope }) => scope === "https://accounts.x.ai/sign-in")
+      ?.entry ??
+    null
+  );
+}
+
+function readGrokToken() {
+  try {
+    return (
+      findGrokAuthEntry(JSON.parse(readFileSync(GROK_AUTH_FILE, "utf8")))?.key
+        ?.trim() || null
+    );
+  } catch {
+    return null;
+  }
+}
+
+function fetchGrokJson(path, token, maxTime) {
+  try {
+    const out = execSync(
+      `/usr/bin/curl -sS --max-time ${maxTime} -w '\n%{http_code}' -H @- "${GROK_API}${path}"`,
+      {
+        encoding: "utf8",
+        timeout: (maxTime + 3) * 1000,
+        input:
+          `Authorization: Bearer ${token}\n` +
+          "x-xai-token-auth: xai-grok-cli\n" +
+          "Accept: application/json\n",
+        stdio: ["pipe", "pipe", "ignore"],
+      },
+    );
+    const nl = out.lastIndexOf("\n");
+    const status = parseInt(out.slice(nl + 1).trim(), 10);
+    if (status !== 200) return null;
+    return JSON.parse(nl >= 0 ? out.slice(0, nl) : out);
+  } catch {
+    return null;
+  }
+}
+
+function readPrevGrok() {
+  try {
+    const g = JSON.parse(readFileSync(SNAPSHOT_FILE, "utf8"))?.grok;
+    if (
+      g &&
+      g.error == null &&
+      Number.isFinite(g.usedPct) &&
+      g.usedPct >= 0 &&
+      g.usedPct <= 100 &&
+      Number.isFinite(g.remainingPct) &&
+      g.remainingPct >= 0 &&
+      g.remainingPct <= 100
+    )
+      return g;
+  } catch {}
+  return null;
+}
+
+function grokTimestamp(value) {
+  const ms = typeof value === "string" ? Date.parse(value) : NaN;
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+}
+
+function grokNumber(value) {
+  if (
+    value == null ||
+    value === "" ||
+    typeof value === "boolean" ||
+    (typeof value === "string" && !value.trim()) ||
+    (typeof value !== "number" && typeof value !== "string")
+  )
+    return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function cleanGrokLabel(value) {
+  return String(value).replace(/[|\r\n]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function getGrok() {
+  const prev = readPrevGrok();
+  const token = readGrokToken();
+  if (!token)
+    return prev
+      ? { ...prev, live: false }
+      : { error: "login", measuredAt: Math.floor(Date.now() / 1000) };
+
+  // 플랜 이름은 보조 정보라 2초 안에 실패하면 일반 "Grok"으로 표시한다.
+  const settings = fetchGrokJson("/v1/settings", token, 2);
+  const rawPlan = settings?.subscription_tier_display;
+  const plan =
+    typeof rawPlan === "string" && rawPlan.trim()
+      ? cleanGrokLabel(rawPlan).slice(0, 80) || null
+      : null;
+  const data = fetchGrokJson("/v1/billing?format=credits", token, 8);
+  const config = data?.config;
+  const rawUsedPct = config?.creditUsagePercent;
+  const usedPct = grokNumber(rawUsedPct);
+  if (
+    !config ||
+    usedPct == null ||
+    usedPct < 0 ||
+    usedPct > 100
+  )
+    return prev
+      ? { ...prev, live: false }
+      : { error: "fetch", measuredAt: Math.floor(Date.now() / 1000) };
+
+  const current = config.currentPeriod;
+  let periodStart = null;
+  let resetsAt = null;
+  let rawType = null;
+  if (current && grokTimestamp(current.end) != null) {
+    resetsAt = grokTimestamp(current.end);
+    const currentStart = grokTimestamp(current.start);
+    if (
+      currentStart != null &&
+      currentStart < resetsAt &&
+      currentStart <= Math.floor(Date.now() / 1000)
+    )
+      periodStart = currentStart;
+    rawType = current.type;
+  } else {
+    // currentPeriod와 billingPeriod의 양 끝을 섞지 않는다.
+    const billingStart = grokTimestamp(config.billingPeriodStart);
+    const billingEnd = grokTimestamp(config.billingPeriodEnd);
+    if (
+      billingStart != null &&
+      billingEnd != null &&
+      billingStart < billingEnd &&
+      billingStart <= Math.floor(Date.now() / 1000)
+    ) {
+      periodStart = billingStart;
+      resetsAt = billingEnd;
+    }
+    rawType = current?.type;
+  }
+  const typeText = String(rawType || "").toLowerCase();
+  let periodType = typeText.includes("weekly")
+    ? "weekly"
+    : typeText.includes("monthly")
+      ? "monthly"
+      : null;
+  if (!periodType && periodStart != null && resetsAt != null) {
+    const days = (resetsAt - periodStart) / 86400;
+    if (days >= 6 && days <= 8) periodType = "weekly";
+    else if (days >= 27 && days <= 32) periodType = "monthly";
+  }
+  periodType ||= "credits";
+  const products = Array.isArray(config.productUsage)
+    ? config.productUsage
+        .map((p) => ({
+          product:
+            typeof p?.product === "string"
+              ? cleanGrokLabel(p.product).slice(0, 80)
+              : "",
+          usedPct: grokNumber(p?.usagePercent),
+        }))
+        .filter(
+          (p) =>
+            p.product &&
+            p.usedPct != null &&
+            p.usedPct >= 0 &&
+            p.usedPct <= 100,
+        )
+        .slice(0, 12)
+    : [];
+  const numeric = (value) => {
+    const n = grokNumber(value);
+    return n != null && n >= 0 ? n : null;
+  };
+  return {
+    measuredAt: Math.floor(Date.now() / 1000),
+    live: true,
+    plan,
+    usedPct,
+    remainingPct: 100 - usedPct,
+    periodType,
+    periodStart,
+    resetsAt,
+    products,
+    onDemandCap: numeric(config.onDemandCap?.val),
+    onDemandUsed: numeric(config.onDemandUsed?.val),
+  };
+}
+
 // PixelLab은 토큰이 아니라 구독 생성 횟수(generations)로 과금한다.
 // 토큰은 stdin 헤더로만 넘기고 스냅샷·로그에는 숫자만 남긴다.
 function findPixelLabBearer(node) {
@@ -1397,6 +1614,7 @@ function runCollect() {
       cusage: getClaudeUsage(),
       cmodels: getClaudeModels(),
       codex: getCodex(),
+      grok: getGrok(),
       pixellab: getPixelLab(),
     };
     // 임시 파일 + rename 원자 교체 — 렌더가 반쯤 쓰인 스냅샷을 읽지 않게
@@ -1438,11 +1656,12 @@ if (!snap)
     cusage: null,
     cmodels: null,
     codex: null,
+    grok: null,
     pixellab: null,
   };
 const snapAge = Math.max(0, now - snap.collectedAt);
 // 90초 이상 오래됐으면 백그라운드 재수집 kick — 다음 렌더(2분 뒤)가 새 스냅샷을 읽는다
-if (snapAge > 90) {
+if (snapAge > 90 || !Object.prototype.hasOwnProperty.call(snap, "grok")) {
   try {
     const child = spawn(process.execPath, [process.argv[1], "--collect"], {
       detached: true,
@@ -1455,6 +1674,7 @@ const claude = snap.claude;
 const cusage = snap.cusage;
 const cmodels = snap.cmodels;
 const codex = snap.codex;
+const grok = snap.grok || null;
 const pixellab = snap.pixellab || null;
 // 읽기와 upsert 분리 — 오늘 수집이 실패해도 기존 히스토리(월 누적·스파크라인)는 유지
 const usageHist = readUsageHistory();
@@ -1935,6 +2155,63 @@ if (hasCodex) {
   showedUsage = true;
 }
 
+// Grok — 메뉴바 배터리에는 넣지 않고 드롭다운에서 크레딧 잔량 게이지로 표시
+{
+  if (showedUsage) out.push("---");
+  out.push(
+    `Grok${grok?.plan ? " · " + grok.plan : ""} | size=13 color=#8b949e`,
+  );
+  if (!grok) {
+    out.push("사용량 수집 대기 | size=11 color=#8b949e");
+  } else if (grok.error === "login") {
+    out.push("로그인 필요 · Grok CLI에서 로그인하세요 | size=11 color=#d29922");
+  } else if (
+    grok.error ||
+    !Number.isFinite(grok.usedPct) ||
+    !Number.isFinite(grok.remainingPct)
+  ) {
+    out.push("사용량 조회 실패 | size=11 color=#d29922");
+  } else {
+    const fmtPct = (n) => {
+      const rounded = Math.round(n * 10) / 10;
+      return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+    };
+    const periodLabel =
+      grok.periodType === "weekly"
+        ? "주간"
+        : grok.periodType === "monthly"
+          ? "월간"
+          : "크레딧";
+    out.push(
+      `${periodLabel} 남음 ▕${bar(grok.remainingPct, 20)}▏ ${fmtPct(grok.remainingPct)}%  (사용 ${fmtPct(grok.usedPct)}%) | font=Menlo color=${heatRemainHex(grok.remainingPct)}`,
+    );
+    const details = [];
+    if (grok.resetsAt) {
+      const d = new Date(grok.resetsAt * 1000);
+      const date = `${d.getMonth() + 1}/${d.getDate()}`;
+      details.push(
+        grok.resetsAt > now
+          ? `리셋 ${date} (${fmtDur(grok.resetsAt - now)} 후)`
+          : `리셋 시각 경과 (${date})`,
+      );
+    }
+    details.push(
+      grok.live
+        ? "라이브"
+        : `캐시 · 측정 ${fmtDur(Math.max(0, now - (grok.measuredAt || 0)))} 전`,
+    );
+    out.push(
+      `      ${details.join(" · ")} | font=Menlo size=11 color=${grok.live ? "#8b949e" : "#d29922"}`,
+    );
+    if (Array.isArray(grok.products) && grok.products.length) {
+      out.push(
+        `      제품별 · ${grok.products.map((p) => `${p.product} 사용 ${fmtPct(p.usedPct)}%`).join(" · ")} | font=Menlo size=11 color=#8b949e`,
+      );
+    }
+  }
+  showedUsage = true;
+}
+
 // PixelLab — 과금 단위는 토큰이 아니라 이번 주기 생성 횟수
 if (pixellab) {
   if (showedUsage) out.push("---");
@@ -2071,13 +2348,27 @@ if (upd.hasUpdate) {
   if (claude?.error) healthBits.push("ccusage 오류");
   if (cusage && !cusage.live) healthBits.push("Claude API 캐시 폴백");
   if (codex) healthBits.push(`Codex ${fmtDur(now - codex.measuredAt)} 전`);
+  if (grok?.error === "login") healthBits.push("Grok 로그인 필요");
+  else if (grok?.error) healthBits.push("Grok 조회 실패");
+  else if (grok)
+    healthBits.push(
+      grok.live
+        ? `Grok ${now - grok.measuredAt < 5 ? "방금" : fmtDur(now - grok.measuredAt) + " 전"}`
+        : `Grok 캐시 ${fmtDur(Math.max(0, now - (grok.measuredAt || 0)))} 전`,
+    );
   if (pixellab?.error) healthBits.push("PixelLab 조회 실패");
   else if (pixellab)
     healthBits.push(
       `PixelLab ${pixellab.live && now - pixellab.measuredAt < 5 ? "방금" : fmtDur(now - pixellab.measuredAt) + " 전"}`,
     );
   const healthCol =
-    snapAge > 300 || claude?.error || pixellab?.error ? "#d29922" : "#8b949e";
+    snapAge > 300 ||
+    claude?.error ||
+    grok?.error ||
+    (grok && !grok.live) ||
+    pixellab?.error
+      ? "#d29922"
+      : "#8b949e";
   out.push(
     `📡 ${healthBits.join(" · ")} — 클릭: 지금 재수집 | bash="${process.argv[1]}" param1=--collect terminal=false refresh=true size=11 color=${healthCol}`,
   );
