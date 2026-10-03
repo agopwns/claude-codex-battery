@@ -73,18 +73,23 @@ test('legacy ID and reversed windows map by duration', () => {
 test('malformed timestamps and Spark-only logs do not invent general usage', () => {
   assert.equal(collect([['bad.jsonl', [JSON.stringify({ payload: { rate_limits: rate() } }), event(rate('codex_bengalfox'))]]]), null);
 });
-test('weekly-only render shows XW 97 and unavailable five-hour, without credit exhaustion', () => {
-  const { text, items } = render(collect([['one.jsonl', [event(rate())]]]));
+test('weekly-only render shows only the real XW limit and its credit reset context', () => {
+  const rl = rate();
+  rl.primary.resets_at = now + 88693;
+  const { text, items } = render(collect([['one.jsonl', [event(rl)]]]));
   assert.deepEqual(JSON.parse(JSON.stringify(items)), [{ label: 'XW', remain: 97 }]);
+  assert.match(text, /XW = Codex 주간/);
   assert.match(text, /주간 남음.*97%.*사용 3%/);
-  assert.match(text, /5시간 한도 · 데이터 미제공/);
-  assert.doesNotMatch(text, /5시간 남음|크레딧  소진|다음 회복[^\n]*X5/);
+  assert.match(text, /크레딧  잔액 0 · 주간 리셋 1d 0h · 측정 0m 전/);
+  assert.doesNotMatch(text, /^\s+리셋 |^측정 /m);
+  assert.doesNotMatch(text, /X5(?:·XW)? = Codex|5시간 (?:남음|한도)|소진|한도 초과/);
   assert.match(text, /다음 회복[^\n]*XW/);
 });
 test('old quota observation stays stale and zero extra credits do not trigger Codex runs', () => {
   const codex = collect([['one.jsonl', [event(rate(), now - 4 * 3600)]]]);
   const { text, spawned } = render(codex);
-  assert.match(text, /리셋됐을 수 있음/);
+  assert.match(text, /크레딧[^\n]*측정 4h 0m 전[^\n]*리셋됐을 수 있음/);
+  assert.doesNotMatch(text, /^측정 /m);
   assert.doesNotMatch(text, /다음 회복[^\n]*XW/);
   assert.ok(!spawned.some(args => JSON.stringify(args).includes('reply ok')));
 });
@@ -93,6 +98,64 @@ test('credits-only plans retain their display', () => {
   const { text } = render(collect([['one.jsonl', [event(rl)]]]));
   assert.match(text, /크레딧  잔액 25/);
   assert.doesNotMatch(text, /5시간 남음|주간 남음/);
+});
+test('depleted weekly window shows a formatted positive credit balance without auto-spend', () => {
+  const rl = rate('codex', 100);
+  rl.primary.resets_at = now + 88693;
+  rl.credits = { has_credits: true, unlimited: false, balance: '59070.9533795000' };
+  const codex = collect([['one.jsonl', [event(rl, now - 4 * 3600)]]]);
+  const { text, spawned } = render(codex);
+  assert.match(text, /주간 남음.*0%.*사용 100%/);
+  assert.match(text, /크레딧  잔액 59,070\.95 · 주간 리셋 1d 0h · 측정 4h 0m 전/);
+  assert.ok(!spawned.some(args => JSON.stringify(args).includes('reply ok')));
+});
+test('credit row omits reset context when the weekly reset is missing', () => {
+  const rl = rate();
+  delete rl.primary.resets_at;
+  rl.credits = { has_credits: true, unlimited: false, balance: '12.5' };
+  const { text } = render(collect([['one.jsonl', [event(rl)]]]));
+  assert.match(text, /크레딧  잔액 12\.5 · 측정 0m 전 \|/);
+  assert.doesNotMatch(text, /크레딧[^\n]*주간 리셋/);
+});
+test('credit row labels an expired weekly reset without inventing a countdown', () => {
+  const rl = rate();
+  rl.primary.resets_at = now - 1;
+  rl.credits = { has_credits: true, unlimited: false, balance: '12.5' };
+  const { text } = render(collect([['one.jsonl', [event(rl)]]]));
+  assert.match(text, /크레딧  잔액 12\.5 · 주간 리셋됨/);
+  assert.doesNotMatch(text, /크레딧[^\n]*주간 리셋 (?:NaN|0m)/);
+});
+test('unknown credits-only balance stays explicit and does not create a zero battery', () => {
+  const rl = rate();
+  rl.primary = null;
+  rl.credits = { has_credits: true, unlimited: false, balance: null };
+  const { text, items, spawned } = render(collect([['one.jsonl', [event(rl, now - 4 * 3600)]]]));
+  assert.deepEqual(JSON.parse(JSON.stringify(items)), []);
+  assert.match(text, /크레딧  잔액 알 수 없음/);
+  assert.doesNotMatch(text, /크레딧  잔액 0(?:\D|$)/);
+  assert.ok(!spawned.some(args => JSON.stringify(args).includes('reply ok')));
+});
+test('explicitly absent credits retain the credits-only zero battery without an over-limit claim', () => {
+  const rl = rate();
+  rl.primary = null;
+  rl.credits = { has_credits: false, unlimited: false, balance: null };
+  const { text, items } = render(collect([['one.jsonl', [event(rl)]]]));
+  assert.deepEqual(JSON.parse(JSON.stringify(items)), [{ label: 'X', remain: 0 }]);
+  assert.match(text, /크레딧  없음/);
+  assert.doesNotMatch(text, /한도 초과|잔액 0/);
+});
+test('unlimited credits are shown alongside percentage windows', () => {
+  const rl = rate();
+  rl.credits = { has_credits: true, unlimited: true, balance: null };
+  const { text } = render(collect([['one.jsonl', [event(rl)]]]));
+  assert.match(text, /크레딧  무제한 · 주간 리셋/);
+});
+test('Codex without credit data keeps a standalone measurement row but no gray reset row', () => {
+  const rl = rate();
+  rl.credits = null;
+  const { text } = render(collect([['one.jsonl', [event(rl)]]]));
+  assert.match(text, /^측정 0m 전 \(Codex 세션 기준\)/m);
+  assert.doesNotMatch(text, /^\s+리셋 /m);
 });
 test('v1 snapshot with wrongly selected Spark is discarded', () => {
   const { text } = render({ primary: window(300, 0), secondary: window(10080, 0), plan: 'pro', measuredAt: now }, 1);

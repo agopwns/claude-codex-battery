@@ -48,7 +48,7 @@ const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
 // ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.20.1";
+const VERSION = "1.20.4";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/agopwns/claude-codex-battery/main";
@@ -1214,19 +1214,58 @@ function windowState(w) {
     stale,
   };
 }
+function codexCreditState(credits) {
+  if (!credits) return null;
+  if (credits.unlimited === true)
+    return { kind: "unlimited", balance: null };
+  const raw = credits.balance;
+  const balance =
+    typeof raw === "number"
+      ? raw
+      : typeof raw === "string" && raw.trim() !== ""
+        ? Number(raw)
+        : NaN;
+  if (Number.isFinite(balance)) return { kind: "balance", balance };
+  if (credits.has_credits === false)
+    return { kind: "none", balance: null };
+  return { kind: "unknown", balance: null };
+}
+function formatCodexCreditBalance(balance) {
+  try {
+    return new Intl.NumberFormat(undefined, {
+      maximumFractionDigits: 2,
+    }).format(balance);
+  } catch {
+    return String(balance);
+  }
+}
+function codexWeeklyResetSuffix(codex) {
+  const resetsAt = codex?.weekly?.resets_at;
+  if (!Number.isFinite(resetsAt)) return "";
+  return resetsAt <= now
+    ? " · 주간 리셋됨"
+    : ` · 주간 리셋 ${fmtDur(resetsAt - now)}`;
+}
 // 소진 + 오래됨일 때만 하루 최대 몇 회 Codex를 백그라운드로 굴려 리셋 감지 (throttle 6h)
 function maybeAutoRefreshCodex(codex) {
   try {
     if (!codex) return;
-    // 소진 판정: credits 소진 OR 어떤 창이든 100% 사용
+    // 윈도우가 막혀도 쓸 수 있는 유료 크레딧이 있으면 소진으로 보지 않는다.
+    const credit = codexCreditState(codex.credits);
+    const creditAvailable =
+      credit?.kind === "unlimited" ||
+      (credit?.kind === "balance" && credit.balance > 0);
     let exhausted = false;
     if (!codex.hasWindows && codex.credits) {
-      const cr = codex.credits;
-      exhausted = !cr.unlimited && (!cr.has_credits || Number(cr.balance) <= 0);
+      exhausted =
+        (credit?.kind === "balance" && credit.balance <= 0) ||
+        credit?.kind === "none";
     } else {
       const p = windowState(codex.fiveHour),
         s = windowState(codex.weekly);
-      exhausted = Boolean((p && p.pct >= 100) || (s && s.pct >= 100));
+      exhausted =
+        !creditAvailable &&
+        Boolean((p && p.pct >= 100) || (s && s.pct >= 100));
     }
     if (!exhausted) return;
     if (now - codex.measuredAt < 2 * 3600) return; // 2h+ 오래됐을 때만
@@ -1707,14 +1746,14 @@ if (codex && (codex.fiveHour || codex.weekly)) {
   if (p) battItems.push({ label: "X5", remain: Math.max(0, 100 - p.pct) });
   if (s) battItems.push({ label: "XW", remain: Math.max(0, 100 - s.pct) });
 } else if (codex && !codex.hasWindows && codex.credits) {
-  // premium: 크레딧 잔액 (총량 미제공 → 있음=100 / 소진=0 / 무제한=100)
-  const cr = codex.credits;
-  const remain = cr.unlimited
-    ? 100
-    : cr.has_credits && Number(cr.balance) > 0
-      ? 100
-      : 0;
-  battItems.push({ label: "X", remain });
+  // credits-only 폴백: 총량이 없어 상태만 표시한다. 알 수 없는 잔액은 0으로 만들지 않는다.
+  const credit = codexCreditState(codex.credits);
+  if (credit?.kind === "unlimited")
+    battItems.push({ label: "X", remain: 100 });
+  else if (credit?.kind === "balance")
+    battItems.push({ label: "X", remain: credit.balance > 0 ? 100 : 0 });
+  else if (credit?.kind === "none")
+    battItems.push({ label: "X", remain: 0 });
 }
 // 표시 선택 적용 — premium "X" 라벨은 x5 토글에 귀속. 전부 꺼지면 안전하게 전체 표시(드롭다운 진입로 유지)
 const battKey = (label) => (label === "X" ? "x5" : label.toLowerCase());
@@ -2020,10 +2059,14 @@ if (battItems.length) {
   out.push("🔋 —");
 }
 out.push("---");
-const codexLegend =
-  codex?.credits && !codex.hasWindows
+const codexLegendParts = [];
+if (codex?.fiveHour) codexLegendParts.push(["X5", "5시간"]);
+if (codex?.weekly) codexLegendParts.push(["XW", "주간"]);
+const codexLegend = codexLegendParts.length
+  ? `${codexLegendParts.map(([key]) => key).join("·")} = Codex ${codexLegendParts.map(([, label]) => label).join("·")}`
+  : codex?.credits && !codex.hasWindows
     ? "X = Codex 크레딧"
-    : "X5·XW = Codex 5시간·주간";
+    : "Codex 한도";
 const legendParts = [];
 if (hasClaude) legendParts.push("C5·CW·CF = Claude 5시간·주간·Fable");
 if (hasCodex) legendParts.push(codexLegend);
@@ -2097,43 +2140,47 @@ if (hasCodex) {
   );
   const p = windowState(codex.fiveHour);
   const s = windowState(codex.weekly);
-  // premium: primary/secondary 없이 크레딧 잔액만
-  if (!codex.hasWindows && codex.credits) {
-    const cr = codex.credits;
-    if (cr.unlimited) {
-      out.push("크레딧  무제한 | font=Menlo color=#3fb950");
-    } else if (!cr.has_credits || Number(cr.balance) <= 0) {
-      out.push("크레딧  소진 · 한도 초과 (0) | font=Menlo color=#f85149");
+  const age = now - codex.measuredAt;
+  const staleWarn = age > 3 * 3600; // 3시간+ 오래됨 → 리셋됐을 수 있음
+  const measured = ` · 측정 ${fmtDur(age)} 전${staleWarn ? " · ⚠ 리셋됐을 수 있음, Codex 쓰면 갱신" : ""}`;
+  // 크레딧은 퍼센트 윈도우와 함께 올 수 있으므로 별도 스냅샷 행으로 항상 표시한다.
+  if (codex.credits) {
+    const credit = codexCreditState(codex.credits);
+    const weeklyReset = codexWeeklyResetSuffix(codex);
+    if (credit?.kind === "unlimited") {
       out.push(
-        "      Codex 설정에서 크레딧 구매 또는 리셋 대기 | font=Menlo size=11 color=#8b949e",
+        `크레딧  무제한${weeklyReset}${measured} | font=Menlo color=${staleWarn ? "#d29922" : "#3fb950"}`,
+      );
+    } else if (credit?.kind === "balance") {
+      const color = staleWarn
+        ? "#d29922"
+        : credit.balance > 0
+          ? "#3fb950"
+          : "#8b949e";
+      out.push(
+        `크레딧  잔액 ${formatCodexCreditBalance(credit.balance)}${weeklyReset}${measured} | font=Menlo color=${color}`,
+      );
+    } else if (credit?.kind === "none") {
+      out.push(
+        `크레딧  없음${weeklyReset}${measured} | font=Menlo color=${staleWarn ? "#d29922" : "#8b949e"}`,
       );
     } else {
-      out.push(`크레딧  잔액 ${cr.balance} | font=Menlo color=#3fb950`);
+      out.push(
+        `크레딧  잔액 알 수 없음${weeklyReset}${measured} | font=Menlo color=#d29922`,
+      );
     }
   }
   if (p) {
-    const reset = p.stale
-      ? "리셋됨"
-      : p.resetsIn != null
-        ? `리셋 ${fmtDur(p.resetsIn)}`
-        : "";
     const pr = Math.max(0, 100 - p.pct);
     out.push(
       `5시간 남음 ▕${bar(pr, 20)}▏ ${Math.round(pr)}%  (사용 ${Math.round(p.pct)}%) | font=Menlo color=${heatRemainHex(pr)}`,
     );
-    out.push(`      ${reset} | font=Menlo size=11 color=#8b949e`);
   }
   if (s) {
-    const reset = s.stale
-      ? "리셋됨"
-      : s.resetsIn != null
-        ? `리셋 ${fmtDur(s.resetsIn)}`
-        : "";
     const sr = Math.max(0, 100 - s.pct);
     out.push(
       `주간 남음  ▕${bar(sr, 20)}▏ ${Math.round(sr)}%  (사용 ${Math.round(s.pct)}%) | font=Menlo color=${heatRemainHex(sr)}`,
     );
-    out.push(`      ${reset} | font=Menlo size=11 color=#8b949e`);
     if (!s.stale) {
       const paceRow = weeklyPaceRow(
         s.pct,
@@ -2143,15 +2190,12 @@ if (hasCodex) {
       if (paceRow) out.push(paceRow);
     }
   }
-  if (codex.hasWindows && !p)
-    out.push("5시간 한도 · 데이터 미제공 | size=11 color=#8b949e");
   if (codex.hasWindows && !s)
     out.push("주간 한도 · 데이터 미제공 | size=11 color=#8b949e");
-  const age = now - codex.measuredAt;
-  const staleWarn = age > 3 * 3600; // 3시간+ 오래됨 → 리셋됐을 수 있음
-  out.push(
-    `측정 ${fmtDur(age)} 전${staleWarn ? "  ·  ⚠ 리셋됐을 수 있음, Codex 쓰면 갱신" : " (Codex 세션 기준)"} | size=11 color=${staleWarn ? "#d29922" : "#8b949e"}`,
-  );
+  if (!codex.credits)
+    out.push(
+      `측정 ${fmtDur(age)} 전${staleWarn ? "  ·  ⚠ 리셋됐을 수 있음, Codex 쓰면 갱신" : " (Codex 세션 기준)"} | size=11 color=${staleWarn ? "#d29922" : "#8b949e"}`,
+    );
   showedUsage = true;
 }
 

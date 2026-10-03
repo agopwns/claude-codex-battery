@@ -26,7 +26,7 @@ Built as a single [SwiftBar](https://github.com/swiftbar/SwiftBar) plugin — on
 | Group | Batteries | Source |
 |-------|-----------|--------|
 | **`C` Claude** | 5-hour session · weekly · **Fable** (top-model weekly cap) | Anthropic's OAuth usage API — queried live with your local Claude Code login; **account-level**, so usage from every device/surface is included |
-| **`X` Codex** | 5-hour · weekly (or credit balance on the premium plan) | `~/.codex/sessions/**/*.jsonl` → `rate_limits` |
+| **`X` Codex** | Available limit-window batteries (5-hour and/or weekly); credit balance in the dropdown when reported | `~/.codex/sessions/**/*.jsonl` → `rate_limits` |
 | **Grok** | Weekly/monthly credit remaining and used % gauge, server reset time, product breakdown | xAI CLI billing API using the local Grok CLI login; dropdown gauge only, no separate menu-bar battery |
 
 Click the widget for a dropdown with, per limit:
@@ -38,10 +38,12 @@ Claude Code
   Fable          ▕████░░░░░░░░░░░░░░░░▏ 26%  (used 74%)  · resets 3d 21h
   today by model ▕████████████▏ Fable $75 · Opus $46 · Sonnet $5 …
 
-Codex · prolite
-  5h remaining   ▕████████████████████▏ 100% (used 0%)
+Codex · pro
   weekly         ▕████████████████▋░░░▏ 83%  (used 17%)
+  credits        balance 59,070.95 · weekly reset 1d 0h · measured 1m ago
 ```
+
+The credit balance is a snapshot, not a percentage. Its `weekly reset` suffix describes the accompanying weekly limit window; purchased credits do not provide a separate renewal timestamp in this data.
 
 Colors follow a traffic-light scale: green ≥ 50 % left, amber < 50 %, red < 20 %.
 
@@ -136,7 +138,7 @@ The whole thing is one `.js` file run by bun on a timer.
 
 - **Battery icons** are drawn pixel-by-pixel into an RGBA buffer and encoded to PNG using only `node:zlib` (hand-rolled CRC32 + IHDR/IDAT/IEND chunks). A 5×7 bitmap font renders the numbers and the `C`/`X` group labels. SwiftBar displays the PNG at pixels ÷ 2 pt.
 - **Claude limits** are fetched from Anthropic's OAuth usage endpoint using the Claude Code login token in your Keychain, with the last good response cached at `~/.claude/swiftbar/.claude-usage.json` as an offline fallback. The Fable cap is the `weekly_scoped` entry.
-- **Codex limits** come from the newest session's `rate_limits`. The premium plan reports a `credits` object instead of percentages when exhausted; the widget handles both shapes.
+- **Codex limits** come from the newest session's `rate_limits`. Percentage windows and purchased credits may be reported together; the widget keeps the batteries as window percentages and shows the credit balance separately as a snapshot with locale separators and at most two decimal places.
 - **Grok usage** comes from `cli-chat-proxy.grok.com/v1/billing?format=credits`, with the optional plan label from `/v1/settings`. Missing percentages are shown as unavailable rather than assumed unused.
 
 ### Codex has one quirk
